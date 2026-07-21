@@ -1,0 +1,21 @@
+# Generated DB (rebuild via ./run.sh --rebuild)
+data/*.db
+data/*.db-journal
+
+# Runtime artifacts
+.ksp.pid
+.ksp.log
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp

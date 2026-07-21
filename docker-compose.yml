@@ -1,0 +1,8 @@
+services:
+  ksp-cip:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      KSP_DB: /app/data/ksp.db
+    restart: unless-stopped
