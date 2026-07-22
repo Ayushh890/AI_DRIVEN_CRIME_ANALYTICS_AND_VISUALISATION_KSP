@@ -3,7 +3,10 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>KSP CIP · Crime Intelligence Platform</title>
+  <title>KSP CIP · Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
   <link rel="preconnect" href="https://unpkg.com" />
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <link rel="stylesheet" href="https://unpkg.com/vis-network@9.1.9/styles/vis-network.min.css" />
@@ -11,30 +14,22 @@
 </head>
 <body>
   <aside class="sidebar" id="sidebar">
-    <div class="brand">
+    <a class="brand" href="/">
       <div class="brand-mark">KSP</div>
       <div class="brand-text">
         <div class="brand-title">Crime Intelligence</div>
         <div class="brand-sub">SCRB · Karnataka</div>
       </div>
-    </div>
+    </a>
     <nav class="nav">
-      <button class="nav-item active" data-tab="overview">
-        <span class="nav-icon">◈</span><span>Overview</span></button>
-      <button class="nav-item" data-tab="geo">
-        <span class="nav-icon">◉</span><span>Geospatial</span></button>
-      <button class="nav-item" data-tab="predict">
-        <span class="nav-icon">↗</span><span>Predict</span></button>
-      <button class="nav-item" data-tab="network">
-        <span class="nav-icon">⊙</span><span>Network</span></button>
-      <button class="nav-item" data-tab="crossborder">
-        <span class="nav-icon">↔</span><span>Cross-border</span></button>
-      <button class="nav-item" data-tab="laworder">
-        <span class="nav-icon">§</span><span>Law &amp; Order</span></button>
-      <button class="nav-item" data-tab="anomaly">
-        <span class="nav-icon">⚠</span><span>Anomalies</span></button>
-      <button class="nav-item" data-tab="assistant">
-        <span class="nav-icon">✦</span><span>AI Assistant</span></button>
+      <button class="nav-item active" data-tab="overview"><span class="nav-icon ni-overview"></span><span>Overview</span></button>
+      <button class="nav-item" data-tab="geo"><span class="nav-icon ni-geo"></span><span>Geospatial</span></button>
+      <button class="nav-item" data-tab="predict"><span class="nav-icon ni-predict"></span><span>Predict</span></button>
+      <button class="nav-item" data-tab="network"><span class="nav-icon ni-network"></span><span>Network</span></button>
+      <button class="nav-item" data-tab="crossborder"><span class="nav-icon ni-crossborder"></span><span>Cross-border</span></button>
+      <button class="nav-item" data-tab="laworder"><span class="nav-icon ni-laworder"></span><span>Law &amp; Order</span></button>
+      <button class="nav-item" data-tab="anomaly"><span class="nav-icon ni-anomaly"></span><span>Anomalies</span></button>
+      <button class="nav-item" data-tab="assistant"><span class="nav-icon ni-assistant"></span><span>AI Assistant</span></button>
     </nav>
     <div class="sidebar-footer">
       <div class="sidebar-badge">
@@ -50,7 +45,6 @@
       <button class="menu-toggle" id="menu-toggle" aria-label="Toggle menu">☰</button>
       <div class="topbar-title" id="tab-title">Overview</div>
 
-      <!-- Contextual filter strip — visible only on tabs that use it -->
       <div class="filter-strip" id="filter-strip" data-visible="1">
         <div class="filter-group">
           <label>From <input type="date" id="f-from" /></label>
@@ -66,11 +60,19 @@
           <button id="f-reset" class="btn">Reset</button>
         </div>
       </div>
+
+      <div class="user-chip" id="user-chip" hidden>
+        <div class="who">
+          <span class="name" id="user-name">—</span>
+          <span class="role" id="user-role">—</span>
+        </div>
+        <div class="avatar" id="user-avatar">?</div>
+        <button class="logout" id="btn-logout" title="Sign out">Sign out</button>
+      </div>
     </header>
 
     <div class="viewport" id="viewport">
 
-      <!-- OVERVIEW -->
       <section class="tab-panel active" data-panel="overview">
         <div class="kpis" id="kpis"></div>
         <div class="grid" style="--min-card-w: 380px">
@@ -83,7 +85,6 @@
         </div>
       </section>
 
-      <!-- GEOSPATIAL -->
       <section class="tab-panel" data-panel="geo">
         <div class="split split-2-1">
           <div class="card fill-height">
@@ -104,7 +105,6 @@
         </div>
       </section>
 
-      <!-- PREDICT -->
       <section class="tab-panel" data-panel="predict">
         <div class="split split-3-2">
           <div class="card fill-height">
@@ -112,11 +112,7 @@
               <h3>Predicted crime density</h3>
               <div class="inline-controls">
                 <label>Horizon
-                  <select id="predict-horizon">
-                    <option value="4" selected>4 weeks</option>
-                    <option value="8">8 weeks</option>
-                    <option value="12">12 weeks</option>
-                  </select>
+                  <select id="predict-horizon"><option value="4" selected>4 weeks</option><option value="8">8 weeks</option><option value="12">12 weeks</option></select>
                 </label>
                 <label>Crime head
                   <select id="predict-head"><option value="">All heads</option></select>
@@ -141,7 +137,6 @@
         </div>
       </section>
 
-      <!-- NETWORK -->
       <section class="tab-panel" data-panel="network">
         <div class="split split-1-3">
           <div class="card fill-height">
@@ -165,15 +160,14 @@
         </div>
       </section>
 
-      <!-- CROSS-BORDER -->
       <section class="tab-panel" data-panel="crossborder">
         <div class="split split-3-2">
           <div class="card fill-height">
-            <div class="card-head"><h3>Arrests outside Karnataka</h3><span class="hint">Home-district → arrest-district arcs</span></div>
+            <div class="card-head"><h3>Arrests outside Karnataka</h3><span class="hint">Home → arrest arcs</span></div>
             <div class="card-body no-pad"><div id="cb-map" class="map-canvas"></div></div>
           </div>
           <div class="stack">
-            <div class="card"><div class="card-head"><h3>Arrests by state</h3></div><div class="card-body chart-body-md"><canvas id="cb-state"></canvas></div></div>
+            <div class="card"><div class="card-head"><h3>By state</h3></div><div class="card-body chart-body-md"><canvas id="cb-state"></canvas></div></div>
             <div class="card"><div class="card-head"><h3>By crime class</h3></div><div class="card-body chart-body-md"><canvas id="cb-class"></canvas></div></div>
           </div>
         </div>
@@ -181,14 +175,13 @@
           <div class="card-head"><h3>Offenders arrested across multiple states</h3></div>
           <div class="card-body no-pad">
             <table class="data-table" id="cb-offenders">
-              <thead><tr><th>Name</th><th>Total arrests</th><th>Distinct states</th><th>States</th></tr></thead>
+              <thead><tr><th>Name</th><th class="num">Total arrests</th><th class="num">Distinct states</th><th>States</th></tr></thead>
               <tbody></tbody>
             </table>
           </div>
         </div>
       </section>
 
-      <!-- LAW & ORDER -->
       <section class="tab-panel" data-panel="laworder">
         <div class="grid" style="--min-card-w: 460px">
           <div class="card">
@@ -225,11 +218,10 @@
         </div>
       </section>
 
-      <!-- ANOMALIES -->
       <section class="tab-panel" data-panel="anomaly">
         <div class="grid" style="--min-card-w: 460px">
           <div class="card">
-            <div class="card-head"><h3>District × sub-head anomalies</h3><span class="hint">Poisson z-score ≥ 2.0</span></div>
+            <div class="card-head"><h3>District × sub-head anomalies</h3><span class="hint">Poisson z ≥ 2.0</span></div>
             <div class="card-body no-pad">
               <table class="data-table" id="anomaly-list">
                 <thead><tr><th>District</th><th>Sub-head</th><th class="num">Observed</th><th class="num">Expected</th><th class="num">z</th></tr></thead>
@@ -249,29 +241,40 @@
         </div>
       </section>
 
-      <!-- ASSISTANT -->
       <section class="tab-panel" data-panel="assistant">
         <div class="assistant-shell">
           <div class="card assistant-card">
             <div class="card-head">
-              <h3>Ask the CIP AI Assistant</h3>
+              <h3>CIP AI Assistant</h3>
               <span class="hint" id="assistant-backend">backend: —</span>
             </div>
+            <div class="assistant-modes">
+              <button class="mode-chip active" data-mode="auto">Auto</button>
+              <button class="mode-chip" data-mode="analytics">Analytics (SQL)</button>
+              <button class="mode-chip" data-mode="knowledge">Knowledge (law/procedure)</button>
+            </div>
             <div class="card-body">
-              <p class="muted small">Ask questions in plain English. The assistant emits a SQLite query, runs it under a read-only allowlist, and shows results.</p>
-              <div class="assistant-input">
-                <input id="assistant-q" placeholder="e.g. Top 10 offenders arrested in more than 3 states" />
-                <button id="assistant-ask" class="btn btn-primary">Ask</button>
+              <div class="chat-log" id="chat-log">
+                <div class="msg assistant">
+                  <div class="avatar">AI</div>
+                  <div class="bubble">
+                    <b>How can I help?</b><br>
+                    Ask analytical questions ("Top 15 offenders by cases") or domain questions
+                    ("What sections of BNS apply to a night-time house break?"). I'll pick the right mode automatically, or you can force it from the buttons above.
+                  </div>
+                </div>
               </div>
               <div class="assistant-suggestions">
                 <button class="chip">Top 20 offenders by number of cases</button>
-                <button class="chip">Districts with highest heinous crime rate</button>
+                <button class="chip">Which BNS sections apply to chain-snatching?</button>
+                <button class="chip">Procedure for recording a Zero FIR</button>
                 <button class="chip">Chargesheet rate by police station above 60%</button>
-                <button class="chip">Cross-border arrests grouped by state</button>
-                <button class="chip">Which crime sub-heads spiked in the last 90 days?</button>
-                <button class="chip">Investigating officers with highest caseload</button>
+                <button class="chip">How is Section 65B evidence certified?</button>
               </div>
-              <div id="assistant-output"></div>
+              <div class="chat-composer">
+                <textarea id="assistant-q" rows="1" placeholder="Ask about crimes, evidence, law, or query the database…"></textarea>
+                <button id="assistant-ask" class="btn btn-primary">Send</button>
+              </div>
             </div>
           </div>
         </div>
@@ -286,6 +289,7 @@
   <script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
   <script src="https://unpkg.com/chart.js@4.4.4/dist/chart.umd.js"></script>
   <script src="https://unpkg.com/vis-network@9.1.9/dist/vis-network.min.js"></script>
+  <script src="https://unpkg.com/marked@14.1.3/marked.min.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

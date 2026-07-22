@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sign in · KSP CIP</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/app.css" />
+</head>
+<body class="auth-body">
+  <div class="landing-bg-fx" aria-hidden="true">
+    <div class="orb orb-a"></div><div class="orb orb-b"></div>
+  </div>
+
+  <div class="auth-shell">
+    <a class="landing-brand" href="/">
+      <div class="brand-mark">KSP</div>
+      <div class="brand-text">
+        <div class="brand-title">Crime Intelligence</div>
+        <div class="brand-sub">SCRB · Karnataka</div>
+      </div>
+    </a>
+
+    <div class="auth-card">
+      <h1>Sign in</h1>
+      <p class="muted">Welcome back. Sign in with your SCRB account.</p>
+      <form id="login-form" class="auth-form" novalidate>
+        <label>Email
+          <input type="email" name="email" autocomplete="email" required autofocus />
+        </label>
+        <label>Password
+          <input type="password" name="password" autocomplete="current-password" minlength="6" required />
+        </label>
+        <button type="submit" class="btn btn-primary btn-block">Sign in</button>
+        <div class="auth-error" id="err" hidden></div>
+      </form>
+      <div class="auth-footer">
+        Don't have an account? <a href="/register">Create one</a>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const params = new URLSearchParams(location.search);
+    const nextURL = params.get("next") || "/app";
+    const form = document.getElementById("login-form");
+    const err  = document.getElementById("err");
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      err.hidden = true;
+      const data = Object.fromEntries(new FormData(form).entries());
+      const btn  = form.querySelector("button[type=submit]");
+      btn.disabled = true; btn.textContent = "Signing in…";
+      try {
+        const r = await fetch("/auth/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(data),
+          credentials: "include",
+        });
+        if (!r.ok) {
+          const j = await r.json().catch(() => ({}));
+          throw new Error(j.detail || `HTTP ${r.status}`);
+        }
+        location.href = nextURL;
+      } catch (ex) {
+        err.textContent = String(ex.message || ex);
+        err.hidden = false;
+        btn.disabled = false; btn.textContent = "Sign in";
+      }
+    });
+  </script>
+</body>
+</html>

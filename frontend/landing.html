@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>KSP CIP · Crime Intelligence & Analytical Platform</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/app.css" />
+</head>
+<body class="landing-body">
+  <div class="landing-bg-fx" aria-hidden="true">
+    <div class="orb orb-a"></div><div class="orb orb-b"></div><div class="orb orb-c"></div>
+  </div>
+
+  <header class="landing-nav">
+    <a class="landing-brand" href="/">
+      <div class="brand-mark">KSP</div>
+      <div class="brand-text">
+        <div class="brand-title">Crime Intelligence</div>
+        <div class="brand-sub">State Crime Records Bureau · Karnataka</div>
+      </div>
+    </a>
+    <nav class="landing-nav-links">
+      <a href="#capabilities">Capabilities</a>
+      <a href="#tech">Technology</a>
+      <a href="/login" class="btn btn-ghost">Sign in</a>
+      <a href="/register" class="btn btn-primary">Get started</a>
+    </nav>
+  </header>
+
+  <main class="landing-main">
+    <section class="hero">
+      <span class="pill pill-hero">v0.3 · CCTNS-shaped schema · Groq LLM · Catalyst live</span>
+      <h1 class="hero-title">
+        <span class="grad-text">Crime intelligence,</span><br />
+        rebuilt for the SCRB era.
+      </h1>
+      <p class="hero-sub">
+        A single pane of glass for the Karnataka Police — geospatial hotspots, criminological
+        network analysis, AI-driven risk forecasts, and a domain-trained assistant that speaks
+        both SQL and law.
+      </p>
+      <div class="hero-cta">
+        <a href="/register" class="btn btn-primary btn-lg">Create account</a>
+        <a href="/login" class="btn btn-ghost btn-lg">I already have one →</a>
+      </div>
+      <div class="hero-stats">
+        <div><b>20 000+</b><span>synthetic FIRs</span></div>
+        <div><b>31</b><span>Karnataka districts</span></div>
+        <div><b>796</b><span>police stations</span></div>
+        <div><b>2 978</b><span>cross-border arrests</span></div>
+      </div>
+    </section>
+
+    <section id="capabilities" class="cap-grid">
+      <div class="cap">
+        <div class="cap-icon icon-map"></div>
+        <h3>Geospatial hotspots</h3>
+        <p>2 km grid heatmap + district-rate choropleth, filterable across two years of incidents.</p>
+      </div>
+      <div class="cap">
+        <div class="cap-icon icon-brain"></div>
+        <h3>Predictive risk</h3>
+        <p>Holt-Winters weekly forecasts per station × crime head, rolled into a future-density map.</p>
+      </div>
+      <div class="cap">
+        <div class="cap-icon icon-network"></div>
+        <h3>Criminological networks</h3>
+        <p>Louvain community detection, betweenness centrality, MO-cosine linkage across FIRs.</p>
+      </div>
+      <div class="cap">
+        <div class="cap-icon icon-globe"></div>
+        <h3>Cross-border tracking</h3>
+        <p>Arrest arcs from home district to arrest district, offenders moving through multiple states.</p>
+      </div>
+      <div class="cap">
+        <div class="cap-icon icon-scale"></div>
+        <h3>Law & Order status</h3>
+        <p>Court pendency, IO workload, chargesheet mix (A / B / C reports) at a glance.</p>
+      </div>
+      <div class="cap">
+        <div class="cap-icon icon-spark"></div>
+        <h3>AI Assistant</h3>
+        <p>Ask in plain English. Get SQL analytics <em>and</em> BNS / IPC / evidence procedure grounded answers.</p>
+      </div>
+    </section>
+
+    <section id="tech" class="tech">
+      <div class="tech-title">
+        <h2>Built for the way Karnataka Police works</h2>
+        <p>CCTNS-shaped schema, deployed on Zoho Catalyst inside India-DC. Session auth, HTTPS, and a hard read-only allowlist on every LLM-emitted query.</p>
+      </div>
+      <div class="tech-stack">
+        <div class="tech-badge">Python 3.12 · FastAPI</div>
+        <div class="tech-badge">SQLite · PostGIS-ready</div>
+        <div class="tech-badge">Leaflet · Chart.js · vis-network</div>
+        <div class="tech-badge">Groq Llama-3.3 70B</div>
+        <div class="tech-badge">NetworkX (Louvain)</div>
+        <div class="tech-badge">Holt-Winters forecast</div>
+        <div class="tech-badge">Zoho Catalyst AppSail</div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="landing-foot">
+    <div>KSP CIP pilot · SCRB · Karnataka</div>
+    <div><a href="/docs">API docs</a> · <a href="/login">Sign in</a></div>
+  </footer>
+</body>
+</html>

@@ -53,7 +53,11 @@ async function api(path, opts = {}) {
   if (state.aborts[key]) state.aborts[key].abort();
   state.aborts[key] = ctrl;
   try {
-    const r = await fetch(path, { ...opts, signal: ctrl.signal });
+    const r = await fetch(path, { ...opts, signal: ctrl.signal, credentials: "include" });
+    if (r.status === 401) {
+      location.href = "/login?next=" + encodeURIComponent(location.pathname);
+      throw new Error("not authenticated");
+    }
     if (!r.ok) throw new Error(`HTTP ${r.status} ${path}`);
     return await r.json();
   } catch (e) {
@@ -81,6 +85,13 @@ function currentFilterQS(extra = {}) { return qs({ ...state.filters, ...extra })
 // -------------------- bootstrap -------------------------------------------
 async function bootstrap() {
   wireStaticUI();
+  // Auth check — if 401 our api() helper will redirect.
+  try {
+    const me = await api("/auth/me", { _key: "me" });
+    renderUserChip(me.user);
+    state.currentUser = me.user;
+  } catch { return; }
+
   try {
     const meta = await api("/meta", { _key: "meta" });
     state.meta = meta;
@@ -100,6 +111,14 @@ async function bootstrap() {
     const el = $("#assistant-backend");
     if (el) el.textContent = `backend: ${backend}`;
   }).catch(() => {});
+}
+function renderUserChip(u) {
+  if (!u) return;
+  $("#user-chip").hidden = false;
+  $("#user-name").textContent = u.full_name || u.email;
+  $("#user-role").textContent = u.role || "user";
+  const initials = (u.full_name || u.email || "?").trim().split(/\s+/).slice(0, 2).map(s => s[0]).join("").toUpperCase();
+  $("#user-avatar").textContent = initials || "?";
 }
 function wireStaticUI() {
   // Sidebar nav
@@ -145,10 +164,26 @@ function wireStaticUI() {
 
   // Assistant
   $("#assistant-ask").addEventListener("click", assistantAsk);
-  $("#assistant-q").addEventListener("keydown", (e) => { if (e.key === "Enter") assistantAsk(); });
+  $("#assistant-q").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); assistantAsk(); }
+  });
+  $("#assistant-q").addEventListener("input", (e) => {
+    const t = e.target; t.style.height = "auto"; t.style.height = Math.min(140, t.scrollHeight) + "px";
+  });
   $$(".assistant-suggestions .chip").forEach(c => c.addEventListener("click", () => {
     $("#assistant-q").value = c.textContent.trim(); assistantAsk();
   }));
+  $$(".mode-chip").forEach(c => c.addEventListener("click", () => {
+    $$(".mode-chip").forEach(x => x.classList.remove("active"));
+    c.classList.add("active");
+    state.assistantMode = c.dataset.mode;
+  }));
+
+  // Logout
+  $("#btn-logout").addEventListener("click", async () => {
+    try { await fetch("/auth/logout", { method: "POST", credentials: "include" }); } catch {}
+    location.href = "/login";
+  });
 }
 function populateFilters(meta) {
   const dSel = $("#f-district");
@@ -766,38 +801,85 @@ async function loadAnomaliesAndTrends() {
   }).join("") : `<tr><td colspan="5" class="empty-state">Not enough data.</td></tr>`;
 }
 
-// -------------------- ASSISTANT ------------------------------------------
+// -------------------- ASSISTANT (chat, multi-turn) -----------------------
+state.assistantHistory = [];
+state.assistantMode = "auto";
+
+function appendMsg(role, contentHTML) {
+  const log = $("#chat-log");
+  const wrap = document.createElement("div");
+  wrap.className = `msg ${role}`;
+  wrap.innerHTML = `
+    <div class="avatar">${role === "user" ? "You" : "AI"}</div>
+    <div class="bubble">${contentHTML}</div>`;
+  log.appendChild(wrap);
+  log.scrollTop = log.scrollHeight;
+  return wrap;
+}
+function renderMarkdown(md) {
+  if (window.marked && marked.parse) {
+    marked.setOptions({ breaks: true, gfm: true });
+    return marked.parse(md || "");
+  }
+  return `<p>${escapeHtml(md || "")}</p>`;
+}
+
 async function assistantAsk() {
-  const q = $("#assistant-q").value.trim(); if (!q) return;
-  const out = $("#assistant-output");
-  out.innerHTML = `<div class="hint">Thinking…</div>`;
+  const input = $("#assistant-q");
+  const q = input.value.trim();
+  if (!q) return;
+  input.value = ""; input.style.height = "auto";
+  appendMsg("user", `<p>${escapeHtml(q)}</p>`);
+  state.assistantHistory.push({ role: "user", content: q });
+
+  const thinking = appendMsg("assistant", `<div class="hint">Thinking…</div>`);
   let r;
   try {
     r = await api("/assistant/ask", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ question: q }), _key: "assistant",
+      body: JSON.stringify({ question: q, mode: state.assistantMode, history: state.assistantHistory }),
+      _key: "assistant",
     });
-  } catch { return; }
+  } catch { thinking.querySelector(".bubble").innerHTML = `<div class="error-inline">Assistant request failed.</div>`; return; }
+
   const backendCls = r.backend === "offline" ? "offline" : "online";
-  let html = `
-    <div class="assistant-meta">
+  const modeCls    = r.mode === "knowledge" ? "knowledge" : "analytics";
+
+  let html = "";
+  if (r.mode === "knowledge") {
+    html += renderMarkdown(r.answer || "");
+    state.assistantHistory.push({ role: "assistant", content: r.answer || "" });
+    html += `<div class="expl">
+      <span class="badge-backend ${modeCls}">knowledge</span>
       <span class="badge-backend ${backendCls}">${escapeHtml(r.backend)}</span>
-      <span class="explanation">${escapeHtml(r.explanation || "")}</span>
-    </div>
-    <pre>${escapeHtml(r.sql)}</pre>`;
-  if (r.error) {
-    html += `<div class="error">${escapeHtml(r.error)}</div>`;
-  } else if (r.rows.length === 0) {
-    html += `<div class="hint">Query returned no rows.</div>`;
+    </div>`;
   } else {
-    html += `<div style="max-height:420px; overflow:auto"><table class="data-table">
-      <thead><tr>${r.columns.map(c => `<th>${escapeHtml(c)}</th>`).join("")}</tr></thead>
-      <tbody>${r.rows.slice(0, 200).map(row =>
-        `<tr>${row.map(v => `<td>${escapeHtml(String(v ?? "—"))}</td>`).join("")}</tr>`).join("")}</tbody>
-      </table></div>
-      <div class="row-count">${r.row_count} row(s)</div>`;
+    // analytics
+    html += `<div class="expl">
+      <span class="badge-backend ${modeCls}">analytics</span>
+      <span class="badge-backend ${backendCls}">${escapeHtml(r.backend)}</span>
+      ${r.explanation ? `<span>${escapeHtml(r.explanation)}</span>` : ""}
+    </div>`;
+    if (r.sql) html += `<pre>${escapeHtml(r.sql)}</pre>`;
+    if (r.error) {
+      html += `<div class="error-inline">${escapeHtml(r.error)}</div>`;
+    } else if (!r.rows.length) {
+      html += `<div class="hint">Query returned no rows.</div>`;
+    } else {
+      html += `<div style="max-height:360px; overflow:auto"><table>
+        <thead><tr>${r.columns.map(c => `<th>${escapeHtml(c)}</th>`).join("")}</tr></thead>
+        <tbody>${r.rows.slice(0, 100).map(row =>
+          `<tr>${row.map(v => `<td>${escapeHtml(String(v ?? "—"))}</td>`).join("")}</tr>`).join("")}</tbody>
+        </table></div>
+        <div class="row-count">${r.row_count} row(s)${r.row_count > 100 ? ` — showing first 100` : ""}</div>`;
+    }
+    // For history, capture a short text summary.
+    state.assistantHistory.push({
+      role: "assistant",
+      content: (r.explanation ? r.explanation + " " : "") + `Returned ${r.row_count} rows.`,
+    });
   }
-  out.innerHTML = html;
+  thinking.querySelector(".bubble").innerHTML = html;
   $("#assistant-backend").textContent = `backend: ${r.backend}`;
 }
 

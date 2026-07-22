@@ -50,23 +50,47 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Cookie, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import prediction, network_analysis, llm
+from . import prediction, network_analysis, llm, auth
 
 DB_PATH = Path(os.environ.get("KSP_DB", "data/ksp.db")).resolve()
+AUTH_DB_PATH = Path(os.environ.get("KSP_AUTH_DB", "/tmp/ksp_auth.db")).resolve()
 FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
 KARNATAKA_STATE_ID = 29
 
-app = FastAPI(title="KSP Crime Intelligence Platform", version="0.2.0")
+app = FastAPI(title="KSP Crime Intelligence Platform", version="0.3.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
+    allow_origins=["*"], allow_methods=["*"], allow_headers=["*"], allow_credentials=True,
 )
+
+
+# Auth tables live in a separate SQLite DB so the crime DB can be regenerated
+# freely without wiping user accounts. ensure_schema is idempotent, so it's
+# safe to run at every module import.
+AUTH_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+auth.ensure_schema(str(AUTH_DB_PATH))
+
+
+# --------------------------------------------------------------------------
+# Auth dependency
+# --------------------------------------------------------------------------
+def get_user(request: Request) -> dict:
+    sid = request.cookies.get(auth.SESSION_COOKIE)
+    session = auth.load_session(str(AUTH_DB_PATH), sid)
+    if not session:
+        raise HTTPException(401, "not authenticated")
+    return session
+
+
+def optional_user(request: Request) -> dict | None:
+    sid = request.cookies.get(auth.SESSION_COOKIE)
+    return auth.load_session(str(AUTH_DB_PATH), sid)
 
 
 @contextmanager
@@ -679,17 +703,19 @@ def law_status_funnel():
 # ---------- LLM assistant ------------------------------------------------------------
 class AskBody(BaseModel):
     question: str
+    history: list[dict] | None = None    # [{role: 'user'|'assistant', content: '...'}]
+    mode:    str | None = None           # 'auto' | 'analytics' | 'knowledge'
 
 
 @app.post("/assistant/ask")
-def assistant_ask(body: AskBody):
+def assistant_ask(body: AskBody, user: dict = Depends(get_user)):
     q = (body.question or "").strip()
     if not q:
         raise HTTPException(400, "question required")
-    if len(q) > 500:
-        raise HTTPException(400, "question too long (500 char max)")
+    if len(q) > 2000:
+        raise HTTPException(400, "question too long (2000 char max)")
     with db() as c:
-        r = llm.ask(c, q)
+        r = llm.ask(c, q, history=body.history or [], mode=body.mode or "auto")
     return r.__dict__
 
 
@@ -698,10 +724,90 @@ def assistant_health():
     return {"backend": llm._configured_backend()}
 
 
+# ---------- Authentication -----------------------------------------------------------
+@app.post("/auth/register")
+def auth_register(body: auth.RegisterBody, response: Response, request: Request):
+    user = auth.register_user(str(AUTH_DB_PATH), body)
+    sid = auth.create_session(
+        str(AUTH_DB_PATH), user["user_id"],
+        ip=(request.client.host if request.client else None),
+        ua=request.headers.get("user-agent"),
+    )
+    auth.set_session_cookie(response, sid)
+    return {"user": user}
+
+
+@app.post("/auth/login")
+def auth_login(body: auth.LoginBody, response: Response, request: Request):
+    user, sid = auth.login_user(
+        str(AUTH_DB_PATH), body,
+        ip=(request.client.host if request.client else None),
+        ua=request.headers.get("user-agent"),
+    )
+    auth.set_session_cookie(response, sid)
+    return {"user": user}
+
+
+@app.post("/auth/logout")
+def auth_logout(response: Response, request: Request):
+    sid = request.cookies.get(auth.SESSION_COOKIE)
+    if sid:
+        auth.destroy_session(str(AUTH_DB_PATH), sid)
+    auth.clear_session_cookie(response)
+    return {"ok": True}
+
+
+@app.get("/auth/me")
+def auth_me(user: dict = Depends(get_user)):
+    return {"user": user}
+
+
+# ---------- Route protection middleware ----------------------------------------------
+# Endpoints that require an authenticated session. Everything under /api/* is
+# auto-protected via the middleware below; the *original* endpoints are still
+# reachable at their bare paths for backward compatibility but ALSO require auth.
+PUBLIC_PATHS = {
+    "/", "/app", "/login", "/register",
+    "/health", "/openapi.json", "/docs", "/redoc", "/docs/oauth2-redirect",
+    "/favicon.ico",
+}
+PUBLIC_PREFIXES = ("/static/", "/auth/",)
+
+
+@app.middleware("http")
+async def require_auth(request: Request, call_next):
+    path = request.url.path
+    if path in PUBLIC_PATHS or any(path.startswith(p) for p in PUBLIC_PREFIXES):
+        return await call_next(request)
+    # Everything else requires a valid session.
+    sid = request.cookies.get(auth.SESSION_COOKIE)
+    session = auth.load_session(str(AUTH_DB_PATH), sid)
+    if not session:
+        # For API-style paths, return 401 JSON; for HTML pages, redirect.
+        wants_html = "text/html" in (request.headers.get("accept") or "")
+        if wants_html:
+            return RedirectResponse(url=f"/login?next={path}")
+        from fastapi.responses import JSONResponse
+        return JSONResponse({"detail": "not authenticated"}, status_code=401)
+    return await call_next(request)
+
+
 # ---------- static frontend ----------------------------------------------------------
 if FRONTEND_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(FRONTEND_DIR)), name="static")
 
     @app.get("/")
     def index():
+        return FileResponse(FRONTEND_DIR / "landing.html")
+
+    @app.get("/app")
+    def dashboard(user: dict = Depends(get_user)):
         return FileResponse(FRONTEND_DIR / "index.html")
+
+    @app.get("/login")
+    def login_page():
+        return FileResponse(FRONTEND_DIR / "login.html")
+
+    @app.get("/register")
+    def register_page():
+        return FileResponse(FRONTEND_DIR / "register.html")

@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Create account · KSP CIP</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/app.css" />
+</head>
+<body class="auth-body">
+  <div class="landing-bg-fx" aria-hidden="true">
+    <div class="orb orb-a"></div><div class="orb orb-b"></div>
+  </div>
+
+  <div class="auth-shell">
+    <a class="landing-brand" href="/">
+      <div class="brand-mark">KSP</div>
+      <div class="brand-text">
+        <div class="brand-title">Crime Intelligence</div>
+        <div class="brand-sub">SCRB · Karnataka</div>
+      </div>
+    </a>
+
+    <div class="auth-card">
+      <h1>Create your account</h1>
+      <p class="muted">SCRB · District SP · SHO — the first account created becomes admin.</p>
+      <form id="register-form" class="auth-form" novalidate>
+        <label>Full name
+          <input type="text" name="full_name" autocomplete="name" required autofocus />
+        </label>
+        <label>Email
+          <input type="email" name="email" autocomplete="email" required />
+        </label>
+        <div class="two-col">
+          <label>Designation
+            <input type="text" name="designation" placeholder="e.g. SP, SHO, IO" />
+          </label>
+          <label>Unit
+            <input type="text" name="unit_name" placeholder="e.g. Bengaluru Urban PS-14" />
+          </label>
+        </div>
+        <label>Password
+          <input type="password" name="password" autocomplete="new-password" minlength="6" required id="pw" />
+          <div class="pw-meter"><div id="pw-bar"></div></div>
+          <div class="pw-hint" id="pw-hint">6+ characters</div>
+        </label>
+        <button type="submit" class="btn btn-primary btn-block">Create account</button>
+        <div class="auth-error" id="err" hidden></div>
+      </form>
+      <div class="auth-footer">
+        Already have an account? <a href="/login">Sign in</a>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const form = document.getElementById("register-form");
+    const err  = document.getElementById("err");
+    const pw   = document.getElementById("pw");
+    const bar  = document.getElementById("pw-bar");
+    const hint = document.getElementById("pw-hint");
+    function scorePassword(s) {
+      let score = 0;
+      if (s.length >= 6)  score += 20;
+      if (s.length >= 10) score += 20;
+      if (/[A-Z]/.test(s)) score += 20;
+      if (/[0-9]/.test(s)) score += 20;
+      if (/[^A-Za-z0-9]/.test(s)) score += 20;
+      return score;
+    }
+    pw.addEventListener("input", () => {
+      const s = scorePassword(pw.value);
+      bar.style.width = s + "%";
+      bar.dataset.strength = s < 40 ? "weak" : s < 80 ? "ok" : "strong";
+      hint.textContent = s < 40 ? "Weak" : s < 80 ? "Okay" : "Strong";
+    });
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      err.hidden = true;
+      const data = Object.fromEntries(new FormData(form).entries());
+      const btn  = form.querySelector("button[type=submit]");
+      btn.disabled = true; btn.textContent = "Creating…";
+      try {
+        const r = await fetch("/auth/register", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(data),
+          credentials: "include",
+        });
+        if (!r.ok) {
+          const j = await r.json().catch(() => ({}));
+          throw new Error(j.detail || `HTTP ${r.status}`);
+        }
+        location.href = "/app";
+      } catch (ex) {
+        err.textContent = String(ex.message || ex);
+        err.hidden = false;
+        btn.disabled = false; btn.textContent = "Create account";
+      }
+    });
+  </script>
+</body>
+</html>

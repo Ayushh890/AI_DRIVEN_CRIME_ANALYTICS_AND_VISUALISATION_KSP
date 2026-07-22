@@ -470,18 +470,66 @@ def _offline_sql(question: str) -> tuple[str, str] | None:
 
 
 # --------------------------------------------------------------------------
-# Backend selection and result dataclass
+# Knowledge mode — general Q&A on crime, evidence, procedure, law & order
 # --------------------------------------------------------------------------
-@dataclass
-class LLMResult:
-    question: str
-    sql: str
-    explanation: str
-    backend: str
-    columns: list[str]
-    rows: list[list]
-    row_count: int
-    error: str | None = None
+KNOWLEDGE_PROMPT = """You are the KSP CIP Domain Assistant — an authoritative reference for
+Karnataka Police officers on crime investigation, evidence handling, and law
+and order. You answer conversationally and cite the exact BNS / IPC / BNSS /
+IEA / NDPS / IT Act / MV Act sections that apply.
+
+Coverage
+========
+• Substantive offences under the Bharatiya Nyaya Sanhita, 2023 (BNS) and
+  the legacy Indian Penal Code, 1860 (IPC). Reference both when relevant so
+  officers trained on IPC can map to BNS.
+• Procedure under the Bharatiya Nagarik Suraksha Sanhita (BNSS) and the
+  Code of Criminal Procedure, 1973 (CrPC) — FIR registration, Zero FIR,
+  arrest procedure, searches, remand.
+• Evidence handling: chain of custody, forensic sampling, digital evidence
+  under Section 63 of the Bharatiya Sakshya Adhiniyam / Section 65B IEA.
+• Special Acts: NDPS Act, POCSO, IT Act 2000 (esp. §§ 43, 65, 66, 67), Arms
+  Act, MV Act, PWDVA, SC/ST Prevention of Atrocities Act.
+• Investigation best practice, panchanama drafting, seizure memos,
+  chargesheet preparation (Form IF-1 through IF-6).
+• Karnataka-specific: KSP standing orders, Bengaluru Cyber Crime SOPs,
+  CCTNS workflow.
+
+Response rules
+==============
+1. Be crisp and directly useful for an operational officer.
+2. Always cite the sections you rely on ("BNS §303 corresponds to IPC §379…").
+3. If the question is procedural, list steps as a numbered list.
+4. If the question is legal, quote the section's essence, not the raw text.
+5. If a question is ambiguous, ask ONE targeted clarifying question.
+6. NEVER fabricate section numbers. If you don't know, say so.
+7. Respond in Markdown so the UI can render lists, headings and code blocks.
+"""
+
+ROUTER_PROMPT = """You are a router for the KSP CIP Assistant. Classify the user's message
+into exactly one of:
+
+  "analytics"  – the question needs to be answered from the crime database
+                 (counts, comparisons, offender leaderboards, hotspots, etc.).
+  "knowledge"  – the question needs domain knowledge about law, procedure,
+                 evidence handling, or interpretation of the Act (no database
+                 lookup would answer it).
+
+Reply as strict JSON only:  {"mode": "analytics" | "knowledge"}
+"""
+
+
+def _openai_compat_chat(base_url: str, api_key: str, model: str,
+                        messages: list[dict], json_mode: bool = False,
+                        temperature: float = 0.2) -> str:
+    if httpx is None: raise RuntimeError("httpx not installed")
+    body: dict[str, Any] = {"model": model, "temperature": temperature, "messages": messages}
+    if json_mode:
+        body["response_format"] = {"type": "json_object"}
+    with httpx.Client(timeout=45.0) as c:
+        r = c.post(f"{base_url.rstrip('/')}/chat/completions",
+                   headers={"Authorization": f"Bearer {api_key}"}, json=body)
+        r.raise_for_status()
+        return r.json()["choices"][0]["message"]["content"]
 
 
 def _configured_backend() -> str:
@@ -496,28 +544,84 @@ def _configured_backend() -> str:
     return "offline"
 
 
-def _ask_llm(question: str, system: str) -> tuple[str, str, str]:
+def _backend_endpoint_and_key(backend: str) -> tuple[str, str, str] | None:
+    """Return (base_url, api_key, default_model) for OpenAI-compatible backends, or None."""
+    if backend == "groq":
+        return ("https://api.groq.com/openai/v1", os.environ.get("GROQ_API_KEY", ""),
+                os.environ.get("KSP_LLM_MODEL", "llama-3.3-70b-versatile"))
+    if backend == "openai":
+        return (os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+                os.environ.get("OPENAI_API_KEY", ""),
+                os.environ.get("KSP_LLM_MODEL", "gpt-4o-mini"))
+    return None
+
+
+def _route_intent(question: str, backend: str) -> str:
+    """LLM-classify a question as 'analytics' or 'knowledge'. Falls back to a
+    keyword heuristic if the router call fails."""
+    conf = _backend_endpoint_and_key(backend)
+    if conf:
+        base, key, model = conf
+        try:
+            raw = _openai_compat_chat(
+                base, key, model,
+                [
+                    {"role": "system", "content": ROUTER_PROMPT},
+                    {"role": "user",   "content": question},
+                ],
+                json_mode=True, temperature=0.0,
+            )
+            m = re.search(r'\{[^{}]*"mode"[^{}]*\}', raw, re.S)
+            if m:
+                mode = json.loads(m.group(0)).get("mode", "").lower()
+                if mode in ("analytics", "knowledge"):
+                    return mode
+        except Exception:
+            pass
+    # Heuristic fallback.
+    if re.search(r"\b(procedure|section|bns|ipc|cr[.\s]?p[.\s]?c|bnss|evidence|arrest|panchnama|panchanama|"
+                 r"chargesheet|seizure|law|advice|explain|what should|how do i|"
+                 r"applicable|zero fir|remand|bail|fir\s+process|difference between|"
+                 r"how to draft|sop|standing order)\b", question, re.I):
+        return "knowledge"
+    return "analytics"
+
+
+# --------------------------------------------------------------------------
+# Result type
+# --------------------------------------------------------------------------
+@dataclass
+class LLMResult:
+    question: str
+    mode: str              # 'analytics' | 'knowledge'
+    sql: str
+    explanation: str
+    backend: str
+    columns: list[str]
+    rows: list[list]
+    row_count: int
+    answer: str | None = None    # populated in knowledge mode
+    error: str | None = None
+
+
+# --------------------------------------------------------------------------
+# Analytics path — text-to-SQL (existing behaviour, refactored)
+# --------------------------------------------------------------------------
+def _ask_llm_sql(question: str, system: str) -> tuple[str, str, str]:
     backend = _configured_backend()
     raw: str | None = None
-    used = backend
 
-    def try_openai_compat(base, key, default_model):
-        model = os.environ.get("KSP_LLM_MODEL", default_model)
-        return _openai_compat_call(base, key, model, system, question)
-
+    conf = _backend_endpoint_and_key(backend)
     try:
-        if backend == "groq":
-            raw = try_openai_compat(
-                "https://api.groq.com/openai/v1",
-                os.environ["GROQ_API_KEY"],
-                "llama-3.3-70b-versatile",
-            )
-        elif backend == "openai":
-            raw = try_openai_compat(
-                os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
-                os.environ.get("OPENAI_API_KEY", ""),
-                "gpt-4o-mini",
-            )
+        if conf:
+            base, key, model = conf
+            if key:
+                raw = _openai_compat_chat(
+                    base, key, model,
+                    [{"role": "system", "content": system},
+                     {"role": "user",   "content": f"Question: {question}\n\nRespond with JSON only."}],
+                    json_mode=True, temperature=0.0,
+                )
         elif backend == "hf":
             raw = _hf_call(
                 os.environ.get("KSP_LLM_MODEL", "meta-llama/Llama-3.3-70B-Instruct"),
@@ -535,20 +639,16 @@ def _ask_llm(question: str, system: str) -> tuple[str, str, str]:
     if raw:
         try:
             j = json.loads(raw)
-            sql = j.get("sql", "").strip()
-            explanation = j.get("explanation", "")
-            if sql:
-                return sql, explanation, used
+            if j.get("sql"): return j["sql"], j.get("explanation", ""), backend
         except Exception:
             m = re.search(r'\{[^{}]*"sql"[^{}]*\}', raw, re.S)
             if m:
                 try:
                     j = json.loads(m.group(0))
-                    return j.get("sql", ""), j.get("explanation", ""), used
+                    return j.get("sql", ""), j.get("explanation", ""), backend
                 except Exception:
                     pass
 
-    # Offline / fallback path
     off = _offline_sql(question)
     if off:
         sql, expl = off
@@ -560,19 +660,67 @@ def _ask_llm(question: str, system: str) -> tuple[str, str, str]:
     )
 
 
-def ask(conn: sqlite3.Connection, question: str) -> LLMResult:
+# --------------------------------------------------------------------------
+# Knowledge path — direct chat completion with the domain prompt
+# --------------------------------------------------------------------------
+def _ask_llm_knowledge(question: str, history: list[dict]) -> tuple[str, str]:
+    backend = _configured_backend()
+    conf = _backend_endpoint_and_key(backend)
+    if not conf or not conf[1]:
+        # Offline fallback — canned response.
+        return (
+            "The KSP CIP Assistant knowledge mode needs an online LLM. "
+            "Enable it with `./enable-online-llm.sh groq <your_api_key>` and try again. "
+            "For SQL-style analytics questions, the offline templates still work.",
+            "offline",
+        )
+    base, key, model = conf
+    messages = [{"role": "system", "content": KNOWLEDGE_PROMPT}]
+    # Include up to 6 prior turns.
+    for turn in (history or [])[-6:]:
+        role = turn.get("role"); content = turn.get("content")
+        if role in ("user", "assistant") and content:
+            messages.append({"role": role, "content": str(content)[:4000]})
+    messages.append({"role": "user", "content": question})
+    try:
+        answer = _openai_compat_chat(base, key, model, messages, json_mode=False, temperature=0.25)
+        return answer.strip(), backend
+    except Exception as e:
+        return f"⚠ Could not reach the LLM: {e}", backend
+
+
+# --------------------------------------------------------------------------
+# Public entrypoint
+# --------------------------------------------------------------------------
+def ask(conn: sqlite3.Connection, question: str,
+        history: list[dict] | None = None, mode: str = "auto") -> LLMResult:
+    backend = _configured_backend()
+    resolved_mode = mode
+    if resolved_mode == "auto":
+        resolved_mode = _route_intent(question, backend)
+
+    if resolved_mode == "knowledge":
+        answer, used = _ask_llm_knowledge(question, history or [])
+        return LLMResult(
+            question=question, mode="knowledge",
+            sql="", explanation="", backend=used,
+            columns=[], rows=[], row_count=0, answer=answer,
+        )
+
+    # analytics
     system = build_system_prompt(conn)
-    sql, expl, backend = _ask_llm(question, system)
+    sql, expl, used = _ask_llm_sql(question, system)
     ok, out = _sanitize_sql(sql)
     if not ok:
-        return LLMResult(question=question, sql=sql, explanation=expl, backend=backend,
-                         columns=[], rows=[], row_count=0, error=out)
+        return LLMResult(question=question, mode="analytics", sql=sql, explanation=expl,
+                         backend=used, columns=[], rows=[], row_count=0, error=out)
     try:
         cur = conn.execute(out)
         cols = [c[0] for c in cur.description or []]
         rows = cur.fetchall()
-        return LLMResult(question=question, sql=out, explanation=expl, backend=backend,
-                         columns=cols, rows=[list(r) for r in rows], row_count=len(rows))
+        return LLMResult(question=question, mode="analytics", sql=out, explanation=expl,
+                         backend=used, columns=cols, rows=[list(r) for r in rows],
+                         row_count=len(rows))
     except sqlite3.Error as e:
-        return LLMResult(question=question, sql=out, explanation=expl, backend=backend,
-                         columns=[], rows=[], row_count=0, error=str(e))
+        return LLMResult(question=question, mode="analytics", sql=out, explanation=expl,
+                         backend=used, columns=[], rows=[], row_count=0, error=str(e))
