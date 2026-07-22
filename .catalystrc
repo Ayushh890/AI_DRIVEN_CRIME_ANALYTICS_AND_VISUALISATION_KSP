@@ -1,0 +1,30 @@
+{
+  "defaults": {
+    "project": 1,
+    "env": 1
+  },
+  "actives": {
+    "project": 1,
+    "env": 1
+  },
+  "projects": [
+    {
+      "idx": 1,
+      "id": "43371000000022006",
+      "name": "AI-driven-crime-analytics-and-visualization",
+      "domain": {
+        "id": "50044254710",
+        "name": "ai-driven-crime-analytics-and-visualization-60079422721.development"
+      },
+      "timezone": "Asia/Kolkata",
+      "env": [
+        {
+          "idx": 1,
+          "id": "60079422721",
+          "name": "Development",
+          "type": 3
+        }
+      ]
+    }
+  ]
+}

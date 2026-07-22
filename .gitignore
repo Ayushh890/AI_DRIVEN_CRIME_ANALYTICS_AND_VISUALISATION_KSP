@@ -25,3 +25,21 @@ venv/
 .idea/
 .vscode/
 *.swp
+
+# Catalyst predeploy artifacts (installed into app-server/ by pip -t .)
+app-server/fastapi*
+app-server/starlette*
+app-server/pydantic*
+app-server/uvicorn*
+app-server/httpx*
+app-server/httpcore*
+app-server/anyio*
+app-server/sniffio*
+app-server/networkx*
+app-server/annotated_types*
+app-server/certifi*
+app-server/click*
+app-server/h11*
+app-server/idna*
+app-server/typing_extensions*
+app-server/bin/

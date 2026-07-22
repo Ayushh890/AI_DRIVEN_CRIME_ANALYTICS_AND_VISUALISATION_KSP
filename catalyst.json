@@ -1,21 +1,8 @@
 {
-  "projects": {
-    "productionProjectId": "0"
-  },
-  "envs": {
-    "development": {
-      "projectId": "REPLACE_WITH_PROJECT_ID_FROM_catalyst_init",
-      "projectName": "ksp-cip",
-      "projectType": "live",
-      "environment": "development"
-    }
-  },
-  "app_sail": [
+  "appsail": [
     {
-      "name": "ksp-cip-server",
-      "path": "app-server"
+      "source": "app-server",
+      "name": "ksp-cip-server"
     }
-  ],
-  "functions": [],
-  "client": {}
+  ]
 }
