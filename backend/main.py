@@ -56,7 +56,7 @@ from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import prediction, network_analysis, llm, auth
+from . import prediction, network_analysis, llm, auth, biometric
 
 DB_PATH = Path(os.environ.get("KSP_DB", "data/ksp.db")).resolve()
 AUTH_DB_PATH = Path(os.environ.get("KSP_AUTH_DB", "/tmp/ksp_auth.db")).resolve()
@@ -75,6 +75,14 @@ app.add_middleware(
 # safe to run at every module import.
 AUTH_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 auth.ensure_schema(str(AUTH_DB_PATH))
+
+# biometric_records lives in the crime DB (foreign-keys into Accused.person_link_id).
+try:
+    with sqlite3.connect(DB_PATH) as _c:
+        biometric.ensure_schema(_c)
+except sqlite3.Error:
+    # DB may not exist yet on very first boot before start.sh generates it.
+    pass
 
 
 # --------------------------------------------------------------------------
@@ -725,9 +733,26 @@ def assistant_health():
 
 
 # ---------- Authentication -----------------------------------------------------------
+@app.get("/auth/kgid-check")
+def auth_kgid_check(kgid: str = Query(..., min_length=5, max_length=40)):
+    """Public: verify a KGID against the roster BEFORE registering. Returns
+    denormalized officer metadata so the form can preview + confirm."""
+    officer = auth.lookup_kgid(str(DB_PATH), kgid)
+    if not officer:
+        raise HTTPException(404, "KGID not found in the Karnataka Police roster")
+    return {
+        "kgid": officer["KGID"],
+        "full_name": f"{officer['FirstName'] or ''} {officer['LastName'] or ''}".strip(),
+        "rank_name": officer.get("RankName"),
+        "designation": officer.get("DesignationName"),
+        "unit_name": officer.get("UnitName"),
+        "district_name": officer.get("DistrictName"),
+    }
+
+
 @app.post("/auth/register")
 def auth_register(body: auth.RegisterBody, response: Response, request: Request):
-    user = auth.register_user(str(AUTH_DB_PATH), body)
+    user = auth.register_user(str(AUTH_DB_PATH), body, str(DB_PATH))
     sid = auth.create_session(
         str(AUTH_DB_PATH), user["user_id"],
         ip=(request.client.host if request.client else None),
@@ -767,7 +792,7 @@ def auth_me(user: dict = Depends(get_user)):
 # auto-protected via the middleware below; the *original* endpoints are still
 # reachable at their bare paths for backward compatibility but ALSO require auth.
 PUBLIC_PATHS = {
-    "/", "/app", "/login", "/register",
+    "/", "/login", "/register",
     "/health", "/openapi.json", "/docs", "/redoc", "/docs/oauth2-redirect",
     "/favicon.ico",
 }
@@ -790,6 +815,320 @@ async def require_auth(request: Request, call_next):
         from fastapi.responses import JSONResponse
         return JSONResponse({"detail": "not authenticated"}, status_code=401)
     return await call_next(request)
+
+
+# ---------- Officer profile ----------------------------------------------------------
+class ProfilePatch(BaseModel):
+    phone:          str | None = None
+    bio:            str | None = None
+    photo_data_url: str | None = None    # base64 data URL, ~500KB max
+
+
+@app.get("/api/officer/me")
+def officer_me(user: dict = Depends(get_user)):
+    with sqlite3.connect(str(AUTH_DB_PATH)) as c:
+        c.row_factory = sqlite3.Row
+        row = c.execute("""
+            SELECT user_id, email, full_name, role, kgid, employee_id,
+                   rank_name, designation, unit_name, district_name, phone,
+                   photo_data_url, bio, created_at, last_login_at
+            FROM users WHERE user_id = ?
+        """, (user["user_id"],)).fetchone()
+    if not row:
+        raise HTTPException(404, "profile not found")
+    profile = dict(row)
+    # Enrich with the underlying Employee record (DOB, appointment date, etc.).
+    if profile.get("employee_id"):
+        with db() as c:
+            e = c.execute("""
+                SELECT EmployeeDOB, GenderID, BloodGroupID, PhysicallyChallenged,
+                       AppointmentDate
+                FROM Employee WHERE EmployeeID = ?
+            """, (profile["employee_id"],)).fetchone()
+            if e:
+                profile.update({
+                    "date_of_birth":  e["EmployeeDOB"],
+                    "gender":         e["GenderID"],
+                    "blood_group":    e["BloodGroupID"],
+                    "appointment_date": e["AppointmentDate"],
+                })
+    return {"profile": profile}
+
+
+@app.patch("/api/officer/me")
+def officer_update(body: ProfilePatch, user: dict = Depends(get_user)):
+    photo = body.photo_data_url
+    if photo and len(photo) > 800_000:
+        raise HTTPException(400, "photo too large (max ~600KB)")
+    with sqlite3.connect(str(AUTH_DB_PATH)) as c:
+        c.execute("""
+            UPDATE users SET
+                phone = COALESCE(?, phone),
+                bio   = COALESCE(?, bio),
+                photo_data_url = COALESCE(?, photo_data_url)
+            WHERE user_id = ?
+        """, (body.phone, body.bio, photo, user["user_id"]))
+        c.commit()
+    return {"ok": True}
+
+
+# ---------- Case lookup (FIR by CrimeNo / search) -------------------------------------
+@app.get("/api/case/search")
+def case_search(q: str = Query(..., min_length=2, max_length=100),
+                limit: int = Query(30, ge=1, le=100),
+                user: dict = Depends(get_user)):
+    ql = f"%{q.strip()}%"
+    with db() as c:
+        rows = c.execute("""
+            SELECT DISTINCT cm.CaseMasterID AS id, cm.CrimeNo, cm.CrimeRegisteredDate AS reg,
+                   sh.CrimeHeadName AS subhead, ch.CrimeGroupName AS class,
+                   g.LookupValue AS gravity, u.UnitName AS station, d.DistrictName AS district,
+                   st.CaseStatusName AS status
+            FROM CaseMaster cm
+            JOIN CrimeSubHead sh ON sh.CrimeSubHeadID = cm.CrimeMinorHeadID
+            JOIN CrimeHead ch    ON ch.CrimeHeadID    = cm.CrimeMajorHeadID
+            LEFT JOIN GravityOffence g   ON g.GravityOffenceID = cm.GravityOffenceID
+            JOIN Unit u          ON u.UnitID = cm.PoliceStationID
+            JOIN District d      ON d.DistrictID = u.DistrictID
+            LEFT JOIN CaseStatusMaster st ON st.CaseStatusID = cm.CaseStatusID
+            LEFT JOIN Accused a  ON a.CaseMasterID = cm.CaseMasterID
+            LEFT JOIN Victim v   ON v.CaseMasterID = cm.CaseMasterID
+            WHERE cm.CrimeNo LIKE ? OR cm.CaseNo LIKE ?
+               OR a.AccusedName LIKE ? OR v.VictimName LIKE ?
+            ORDER BY cm.CrimeRegisteredDate DESC LIMIT ?
+        """, (ql, ql, ql, ql, limit)).fetchall()
+    return {"results": [dict(r) for r in rows]}
+
+
+@app.get("/api/case/{crime_no}")
+def case_detail(crime_no: str, user: dict = Depends(get_user)):
+    with db() as c:
+        row = c.execute("""
+            SELECT cm.*, sh.CrimeHeadName AS subhead, ch.CrimeGroupName AS class_,
+                   g.LookupValue AS gravity, st.CaseStatusName AS status,
+                   u.UnitName AS station, u.Lat, u.Lng,
+                   d.DistrictName AS district, ct.CourtName AS court,
+                   e.FirstName || ' ' || COALESCE(e.LastName,'') AS io_name,
+                   cat.LookupValue AS category
+            FROM CaseMaster cm
+            JOIN CrimeSubHead sh ON sh.CrimeSubHeadID = cm.CrimeMinorHeadID
+            JOIN CrimeHead ch    ON ch.CrimeHeadID    = cm.CrimeMajorHeadID
+            LEFT JOIN GravityOffence g   ON g.GravityOffenceID = cm.GravityOffenceID
+            LEFT JOIN CaseStatusMaster st ON st.CaseStatusID = cm.CaseStatusID
+            JOIN Unit u          ON u.UnitID = cm.PoliceStationID
+            JOIN District d      ON d.DistrictID = u.DistrictID
+            LEFT JOIN Court ct   ON ct.CourtID = cm.CourtID
+            LEFT JOIN Employee e ON e.EmployeeID = cm.PolicePersonID
+            LEFT JOIN CaseCategory cat ON cat.CaseCategoryID = cm.CaseCategoryID
+            WHERE cm.CrimeNo = ?
+        """, (crime_no,)).fetchone()
+        if not row:
+            raise HTTPException(404, "FIR not found")
+        cm_id = row["CaseMasterID"]
+
+        sections = [dict(r) for r in c.execute("""
+            SELECT asa.ActID AS act, asa.SectionID AS section, s.SectionDescription AS desc
+            FROM ActSectionAssociation asa
+            LEFT JOIN Section s ON s.ActCode = asa.ActID AND s.SectionCode = asa.SectionID
+            WHERE asa.CaseMasterID = ? ORDER BY asa.ActOrderID, asa.SectionOrderID
+        """, (cm_id,))]
+
+        accused = [dict(r) for r in c.execute("""
+            SELECT a.AccusedMasterID, a.AccusedName, a.AgeYear, a.GenderID, a.PersonID,
+                   a.person_link_id, a.is_repeat, d.DistrictName AS home_district
+            FROM Accused a LEFT JOIN District d ON d.DistrictID = a.home_district_id
+            WHERE a.CaseMasterID = ?
+        """, (cm_id,))]
+
+        victims = [dict(r) for r in c.execute("""
+            SELECT VictimMasterID, VictimName, AgeYear, GenderID, VictimPolice
+            FROM Victim WHERE CaseMasterID = ?
+        """, (cm_id,))]
+
+        complainants = [dict(r) for r in c.execute("""
+            SELECT c.ComplainantID, c.ComplainantName, c.AgeYear, c.GenderID,
+                   o.OccupationName, r.ReligionName, cm.caste_master_name AS caste
+            FROM ComplainantDetails c
+            LEFT JOIN OccupationMaster o ON o.OccupationID = c.OccupationID
+            LEFT JOIN ReligionMaster r   ON r.ReligionID = c.ReligionID
+            LEFT JOIN CasteMaster cm     ON cm.caste_master_id = c.CasteID
+            WHERE c.CaseMasterID = ?
+        """, (cm_id,))]
+
+        arrests = [dict(r) for r in c.execute("""
+            SELECT ars.ArrestSurrenderID, ars.ArrestSurrenderDate,
+                   ars.ArrestSurrenderTypeID,
+                   s.StateName AS arrest_state, ad.DistrictName AS arrest_district,
+                   ao.AccusedName
+            FROM ArrestSurrender ars
+            LEFT JOIN Accused ao ON ao.AccusedMasterID = ars.AccusedMasterID
+            LEFT JOIN State s    ON s.StateID = ars.ArrestSurrenderStateId
+            LEFT JOIN District ad ON ad.DistrictID = ars.ArrestSurrenderDistrictId
+            WHERE ars.CaseMasterID = ?
+        """, (cm_id,))]
+
+        cs = [dict(r) for r in c.execute("""
+            SELECT CSID, csdate, cstype FROM ChargesheetDetails WHERE CaseMasterID = ?
+        """, (cm_id,))]
+
+    return {
+        "case":         dict(row),
+        "sections":     sections,
+        "accused":      accused,
+        "victims":      victims,
+        "complainants": complainants,
+        "arrests":      arrests,
+        "chargesheets": cs,
+    }
+
+
+# ---------- Person history (all FIRs for a person_link_id) ---------------------------
+@app.get("/api/person/search")
+def person_search(q: str = Query(..., min_length=2, max_length=100),
+                  limit: int = Query(30, ge=1, le=100),
+                  user: dict = Depends(get_user)):
+    ql = f"%{q.strip()}%"
+    with db() as c:
+        rows = c.execute("""
+            SELECT a.person_link_id AS id, a.AccusedName AS name,
+                   MAX(a.AgeYear) AS age, MAX(a.GenderID) AS gender,
+                   COUNT(DISTINCT a.CaseMasterID) AS cases,
+                   d.DistrictName AS home_district,
+                   MAX(a.is_repeat) AS is_repeat
+            FROM Accused a
+            LEFT JOIN District d ON d.DistrictID = a.home_district_id
+            WHERE a.AccusedName LIKE ? AND a.person_link_id IS NOT NULL
+            GROUP BY a.person_link_id, a.AccusedName
+            ORDER BY cases DESC LIMIT ?
+        """, (ql, limit)).fetchall()
+    return {"results": [dict(r) for r in rows]}
+
+
+@app.get("/api/person/{pid}")
+def person_detail(pid: int, user: dict = Depends(get_user)):
+    with db() as c:
+        p = c.execute("""
+            SELECT a.person_link_id AS id, a.AccusedName AS name,
+                   MAX(a.AgeYear) AS age, MAX(a.GenderID) AS gender,
+                   COUNT(DISTINCT a.CaseMasterID) AS total_cases,
+                   COUNT(DISTINCT cm.CrimeMinorHeadID) AS distinct_subheads,
+                   MIN(cm.CrimeRegisteredDate) AS first_case,
+                   MAX(cm.CrimeRegisteredDate) AS latest_case,
+                   d.DistrictName AS home_district,
+                   MAX(a.is_repeat) AS is_repeat
+            FROM Accused a
+            JOIN CaseMaster cm ON cm.CaseMasterID = a.CaseMasterID
+            LEFT JOIN District d ON d.DistrictID = a.home_district_id
+            WHERE a.person_link_id = ?
+            GROUP BY a.person_link_id, a.AccusedName
+        """, (pid,)).fetchone()
+        if not p:
+            raise HTTPException(404, "person not found")
+
+        cases = [dict(r) for r in c.execute("""
+            SELECT cm.CaseMasterID, cm.CrimeNo, cm.CrimeRegisteredDate AS reg,
+                   sh.CrimeHeadName AS subhead, ch.CrimeGroupName AS class,
+                   g.LookupValue AS gravity, u.UnitName AS station,
+                   d.DistrictName AS district, st.CaseStatusName AS status
+            FROM Accused a
+            JOIN CaseMaster cm ON cm.CaseMasterID = a.CaseMasterID
+            JOIN CrimeSubHead sh ON sh.CrimeSubHeadID = cm.CrimeMinorHeadID
+            JOIN CrimeHead ch    ON ch.CrimeHeadID    = cm.CrimeMajorHeadID
+            LEFT JOIN GravityOffence g ON g.GravityOffenceID = cm.GravityOffenceID
+            JOIN Unit u ON u.UnitID = cm.PoliceStationID
+            JOIN District d ON d.DistrictID = u.DistrictID
+            LEFT JOIN CaseStatusMaster st ON st.CaseStatusID = cm.CaseStatusID
+            WHERE a.person_link_id = ?
+            ORDER BY cm.CrimeRegisteredDate DESC
+        """, (pid,))]
+
+        arrests = [dict(r) for r in c.execute("""
+            SELECT ars.ArrestSurrenderDate, s.StateName AS state, d.DistrictName AS district,
+                   cm.CrimeNo
+            FROM ArrestSurrender ars
+            JOIN Accused a ON a.AccusedMasterID = ars.AccusedMasterID
+            JOIN CaseMaster cm ON cm.CaseMasterID = ars.CaseMasterID
+            LEFT JOIN State s ON s.StateID = ars.ArrestSurrenderStateId
+            LEFT JOIN District d ON d.DistrictID = ars.ArrestSurrenderDistrictId
+            WHERE a.person_link_id = ? ORDER BY ars.ArrestSurrenderDate DESC
+        """, (pid,))]
+
+        bio = c.execute("""
+            SELECT biometric_id, face_data_url, fingerprint_data_url,
+                   height_cm, weight_kg, build, complexion, hair, eye_color,
+                   distinguishing_marks, notes
+            FROM biometric_records WHERE person_link_id = ?
+        """, (pid,)).fetchone()
+
+    return {
+        "person":  dict(p),
+        "cases":   cases,
+        "arrests": arrests,
+        "biometric": dict(bio) if bio else None,
+    }
+
+
+# ---------- Biometric records --------------------------------------------------------
+class BiometricBody(BaseModel):
+    person_link_id: int | None = None
+    accused_name:  str
+    face_data_url: str | None = None
+    fingerprint_data_url: str | None = None
+    height_cm:     int | None = None
+    weight_kg:     int | None = None
+    build:         str | None = None
+    complexion:    str | None = None
+    hair:          str | None = None
+    eye_color:     str | None = None
+    distinguishing_marks: str | None = None
+    notes:         str | None = None
+
+
+@app.post("/api/biometrics")
+def biometric_create(body: BiometricBody, user: dict = Depends(get_user)):
+    if body.face_data_url and len(body.face_data_url) > 900_000:
+        raise HTTPException(400, "face image too large (max ~600KB)")
+    if body.fingerprint_data_url and len(body.fingerprint_data_url) > 900_000:
+        raise HTTPException(400, "fingerprint image too large (max ~600KB)")
+    with db() as c:
+        biometric.ensure_schema(c)
+        bid = biometric.upsert_record(c, body.model_dump(), user_id=user["user_id"])
+    return {"biometric_id": bid}
+
+
+@app.get("/api/biometrics/search")
+def biometric_search(
+    name: str | None = None, build: str | None = None,
+    complexion: str | None = None, marks: str | None = None,
+    min_height: int | None = None, max_height: int | None = None,
+    limit: int = Query(30, ge=1, le=100),
+    user: dict = Depends(get_user),
+):
+    with db() as c:
+        biometric.ensure_schema(c)
+        rows = biometric.search_by_description(c, {
+            "name": name, "build": build, "complexion": complexion, "marks": marks,
+            "min_height": min_height, "max_height": max_height,
+        }, limit=limit)
+    return {"results": rows}
+
+
+class MatchBody(BaseModel):
+    kind: str                # 'face' | 'fingerprint'
+    data_url: str
+    limit: int = 12
+
+
+@app.post("/api/biometrics/match")
+def biometric_match(body: MatchBody, user: dict = Depends(get_user)):
+    if body.kind not in ("face", "fingerprint"):
+        raise HTTPException(400, "kind must be 'face' or 'fingerprint'")
+    if len(body.data_url) > 900_000:
+        raise HTTPException(400, "image too large (max ~600KB)")
+    with db() as c:
+        biometric.ensure_schema(c)
+        matches = biometric.top_matches(c, body.kind, body.data_url, limit=body.limit)
+    return {"matches": matches, "notice": "PILOT reference — production must integrate NAFIS + certified face-rec SDK"}
 
 
 # ---------- static frontend ----------------------------------------------------------

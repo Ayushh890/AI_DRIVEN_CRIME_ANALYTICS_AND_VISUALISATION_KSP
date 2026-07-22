@@ -51,8 +51,15 @@ def ensure_schema(db_path: str) -> None:
                 full_name     TEXT NOT NULL,
                 password_hash TEXT NOT NULL,
                 role          TEXT NOT NULL DEFAULT 'user',
+                kgid          TEXT UNIQUE,          -- Karnataka Govt ID
+                employee_id   INTEGER,              -- FK → crime DB Employee(EmployeeID)
+                rank_name     TEXT,
                 designation   TEXT,
                 unit_name     TEXT,
+                district_name TEXT,
+                phone         TEXT,
+                photo_data_url TEXT,                -- base64 data URL (pilot; use File Store in prod)
+                bio           TEXT,
                 created_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 last_login_at TEXT
             );
@@ -67,6 +74,30 @@ def ensure_schema(db_path: str) -> None:
             CREATE INDEX IF NOT EXISTS ix_sessions_user ON sessions(user_id);
             CREATE INDEX IF NOT EXISTS ix_sessions_expires ON sessions(expires_at);
         """)
+
+
+def lookup_kgid(crime_db_path: str, kgid: str) -> dict | None:
+    """Verify a KGID against the Employee table. Returns denormalized officer
+    metadata if the KGID is valid, else None."""
+    kgid = (kgid or "").strip().upper()
+    if not kgid.startswith("KGID-"):
+        return None
+    try:
+        with sqlite3.connect(crime_db_path) as c:
+            c.row_factory = sqlite3.Row
+            row = c.execute("""
+                SELECT e.EmployeeID, e.KGID, e.FirstName, e.LastName,
+                       r.RankName, dg.DesignationName, u.UnitName, d.DistrictName
+                FROM Employee e
+                LEFT JOIN Rank r         ON r.RankID = e.RankID
+                LEFT JOIN Designation dg ON dg.DesignationID = e.DesignationID
+                LEFT JOIN Unit u         ON u.UnitID = e.UnitID
+                LEFT JOIN District d     ON d.DistrictID = e.DistrictID
+                WHERE UPPER(e.KGID) = ?
+            """, (kgid,)).fetchone()
+        return dict(row) if row else None
+    except sqlite3.Error:
+        return None
 
 
 # --------------------------------------------------------------------------
@@ -147,9 +178,8 @@ EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 class RegisterBody(BaseModel):
     email:       str = Field(..., min_length=4, max_length=200)
     password:    str = Field(..., min_length=6, max_length=128)
-    full_name:   str = Field(..., min_length=1, max_length=120)
-    designation: str | None = Field(default=None, max_length=80)
-    unit_name:   str | None = Field(default=None, max_length=120)
+    kgid:        str = Field(..., min_length=5, max_length=40)      # REQUIRED — Karnataka Govt ID
+    phone:       str | None = Field(default=None, max_length=20)
 
 
 class LoginBody(BaseModel):
@@ -157,29 +187,59 @@ class LoginBody(BaseModel):
     password: str = Field(..., min_length=6, max_length=128)
 
 
-def register_user(db_path: str, body: RegisterBody) -> dict:
+def register_user(db_path: str, body: RegisterBody, crime_db_path: str) -> dict:
     email = body.email.strip().lower()
     if not EMAIL_RE.match(email):
         raise HTTPException(400, "invalid email")
+
+    # KGID whitelist check — verifies the applicant is on the payroll.
+    officer = lookup_kgid(crime_db_path, body.kgid)
+    if not officer:
+        raise HTTPException(
+            403,
+            "This KGID is not in the Karnataka Police roster. Access is restricted to "
+            "serving officers, investigators, and forensic personnel.",
+        )
+    kgid_norm = officer["KGID"]
+    full_name = f"{officer['FirstName'] or ''} {officer['LastName'] or ''}".strip() or "Officer"
+
     with _get_conn(db_path) as c:
-        existing = c.execute("SELECT user_id FROM users WHERE email = ?", (email,)).fetchone()
+        existing = c.execute(
+            "SELECT user_id FROM users WHERE email = ? OR kgid = ?",
+            (email, kgid_norm),
+        ).fetchone()
         if existing:
-            raise HTTPException(409, "an account with this email already exists")
-        # First user becomes admin.
+            raise HTTPException(409, "an account already exists for this email or KGID")
+
         total = c.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-        role = "admin" if total == 0 else "user"
+        role = "admin" if total == 0 else "officer"
+
         try:
             pwd_hash = hash_password(body.password)
         except ValueError as e:
             raise HTTPException(400, str(e))
+
         cur = c.execute(
-            "INSERT INTO users(email, full_name, password_hash, role, designation, unit_name) "
-            "VALUES(?,?,?,?,?,?)",
-            (email, body.full_name.strip(), pwd_hash, role, body.designation, body.unit_name),
+            """INSERT INTO users(
+                    email, full_name, password_hash, role,
+                    kgid, employee_id, rank_name, designation, unit_name, district_name, phone
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                email, full_name, pwd_hash, role,
+                kgid_norm, officer["EmployeeID"],
+                officer.get("RankName"), officer.get("DesignationName"),
+                officer.get("UnitName"), officer.get("DistrictName"),
+                body.phone,
+            ),
         )
         c.commit()
         uid = cur.lastrowid
-        return {"user_id": uid, "email": email, "full_name": body.full_name.strip(), "role": role}
+        return {
+            "user_id": uid, "email": email, "full_name": full_name, "role": role,
+            "kgid": kgid_norm, "employee_id": officer["EmployeeID"],
+            "rank_name": officer.get("RankName"), "designation": officer.get("DesignationName"),
+            "unit_name": officer.get("UnitName"), "district_name": officer.get("DistrictName"),
+        }
 
 
 def login_user(db_path: str, body: LoginBody, ip: str | None = None, ua: str | None = None) -> tuple[dict, str]:

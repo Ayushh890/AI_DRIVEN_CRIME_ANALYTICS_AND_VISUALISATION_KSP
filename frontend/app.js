@@ -227,10 +227,14 @@ async function switchTab(id) {
     geo: "Geospatial",
     predict: "Predictive analytics",
     network: "Criminal network",
+    caselookup: "Case & FIR lookup",
+    personsearch: "Person search",
+    biometric: "Biometric identification",
     crossborder: "Cross-border crime",
     laworder: "Law & Order",
     anomaly: "Anomalies & emerging trends",
     assistant: "AI assistant",
+    profile: "Officer profile",
   })[id] || id;
   const filterStrip = $("#filter-strip");
   filterStrip.setAttribute("data-visible", state.tabsWithFilters.has(id) ? "1" : "0");
@@ -247,6 +251,10 @@ async function refreshCurrentTab(force) {
   if (id === "crossborder") await loadCrossborder();
   if (id === "laworder")    await loadLawOrder();
   if (id === "anomaly")     await loadAnomaliesAndTrends();
+  if (id === "caselookup")  wireCaseLookupOnce();
+  if (id === "personsearch") wirePersonSearchOnce();
+  if (id === "biometric")   wireBiometricOnce();
+  if (id === "profile")     await loadProfile();
 }
 
 // -------------------- OVERVIEW -------------------------------------------
@@ -889,5 +897,317 @@ function pct(a,b){ return b ? (a / b * 100).toFixed(1) + "%" : "—"; }
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[c]));
 }
+
+// ---------------- Case Lookup ----------------------------------------------
+let _caseWired = false;
+function wireCaseLookupOnce() {
+  if (_caseWired) return; _caseWired = true;
+  $("#case-search-btn").addEventListener("click", caseSearch);
+  $("#case-q").addEventListener("keydown", (e) => { if (e.key === "Enter") caseSearch(); });
+}
+async function caseSearch() {
+  const q = $("#case-q").value.trim();
+  if (!q) return;
+  $("#case-detail-card").hidden = true;
+  const listEl = $("#case-results");
+  listEl.innerHTML = `<div class="hint">Searching…</div>`;
+  let r;
+  try { r = await api(`/api/case/search?q=${encodeURIComponent(q)}`, { _key: "case-search" }); } catch { return; }
+  if (!r.results.length) { listEl.innerHTML = `<div class="empty-state">No matches for “${escapeHtml(q)}”.</div>`; return; }
+  listEl.innerHTML = r.results.map(x => `
+    <div class="result-row" data-crime="${escapeHtml(x.CrimeNo)}">
+      <div>
+        <div class="rr-main">${escapeHtml(x.CrimeNo)} — ${escapeHtml(x.subhead)}</div>
+        <div class="rr-sub">${escapeHtml(x.class)} · ${escapeHtml(x.station)}, ${escapeHtml(x.district)} · ${escapeHtml(x.reg?.slice(0,10) || "—")}</div>
+      </div>
+      <span class="rr-badge pill ${statusPillClass(x.status)}">${escapeHtml(x.status || "—")}</span>
+    </div>`).join("");
+  $$("#case-results .result-row").forEach(row => row.addEventListener("click", () => caseDetail(row.dataset.crime)));
+}
+function statusPillClass(s) {
+  if (!s) return "flat";
+  const l = s.toLowerCase();
+  if (l.includes("charge")) return "down";
+  if (l.includes("pending") || l.includes("investigat")) return "warn";
+  if (l.includes("closed")) return "flat";
+  return "info";
+}
+async function caseDetail(crimeNo) {
+  const box = $("#case-detail-card");
+  box.hidden = false;
+  const el = $("#case-detail");
+  el.innerHTML = `<div class="hint" style="padding:20px">Loading…</div>`;
+  let r; try { r = await api(`/api/case/${encodeURIComponent(crimeNo)}`, { _key: "case-detail" }); } catch { return; }
+  const c = r.case;
+  const statusCls = (c.status || "").toLowerCase().includes("charge") ? "chargesheeted"
+                  : (c.status || "").toLowerCase().includes("pending") ? "pending"
+                  : (c.status || "").toLowerCase().includes("investig") ? "investigating"
+                  : "closed";
+  el.innerHTML = `
+    <div class="fir-header">
+      <div>
+        <div class="fir-crimeno">${escapeHtml(c.CrimeNo)}</div>
+        <div class="fir-title">${escapeHtml(c.subhead || "")} · ${escapeHtml(c.class_ || "")}</div>
+      </div>
+      <div class="fir-status-badge ${statusCls}">${escapeHtml(c.status || "—")}</div>
+    </div>
+    <div class="fir-grid">
+      <div class="fir-field"><label>Registered</label><div class="val">${escapeHtml((c.CrimeRegisteredDate||"").slice(0,10))}</div></div>
+      <div class="fir-field"><label>Incident</label><div class="val">${escapeHtml((c.IncidentFromDate||"").replace("T"," ").slice(0,16))}</div></div>
+      <div class="fir-field"><label>Gravity</label><div class="val">${escapeHtml(c.gravity||"—")}</div></div>
+      <div class="fir-field"><label>Category</label><div class="val">${escapeHtml(c.category||"FIR")}</div></div>
+      <div class="fir-field"><label>Station</label><div class="val">${escapeHtml(c.station||"—")}</div></div>
+      <div class="fir-field"><label>District</label><div class="val">${escapeHtml(c.district||"—")}</div></div>
+      <div class="fir-field"><label>Court</label><div class="val">${escapeHtml(c.court||"—")}</div></div>
+      <div class="fir-field"><label>Investigating officer</label><div class="val">${escapeHtml(c.io_name||"—")}</div></div>
+      <div class="fir-field"><label>MO tag</label><div class="val">${escapeHtml(c.modus_operandi||"—")}</div></div>
+      <div class="fir-field"><label>Weapon</label><div class="val">${escapeHtml(c.weapon||"—")}</div></div>
+      <div class="fir-field" style="grid-column: 1 / -1"><label>Brief facts</label><div class="val">${escapeHtml(c.BriefFacts||"—")}</div></div>
+    </div>
+    <div class="fir-section-list">
+      <h4>Act / Section</h4>
+      ${r.sections.length ? r.sections.map(s => `<span class="pill info" style="margin-right:6px">${escapeHtml(s.act)} §${escapeHtml(s.section)}</span>`).join("") : `<span class="hint">None recorded.</span>`}
+    </div>
+    <div class="fir-section-list">
+      <h4>Accused (${r.accused.length})</h4>
+      ${r.accused.length ? `<table class="data-table"><thead><tr><th>#</th><th>Name</th><th class="num">Age</th><th>Gender</th><th>Home district</th><th>Repeat?</th></tr></thead>
+        <tbody>${r.accused.map(a => `<tr><td>${escapeHtml(a.PersonID||"")}</td><td class="strong">${escapeHtml(a.AccusedName)}</td><td class="num">${a.AgeYear ?? "—"}</td><td>${escapeHtml(a.GenderID||"—")}</td><td class="mute">${escapeHtml(a.home_district||"—")}</td><td>${a.is_repeat ? `<span class="pill up">yes</span>` : `—`}</td></tr>`).join("")}</tbody></table>`
+        : `<span class="hint">None listed.</span>`}
+    </div>
+    <div class="fir-section-list">
+      <h4>Victim (${r.victims.length})</h4>
+      ${r.victims.length ? `<table class="data-table"><thead><tr><th>Name</th><th class="num">Age</th><th>Gender</th><th>Police?</th></tr></thead>
+        <tbody>${r.victims.map(v => `<tr><td class="strong">${escapeHtml(v.VictimName)}</td><td class="num">${v.AgeYear ?? "—"}</td><td>${escapeHtml(v.GenderID||"—")}</td><td>${v.VictimPolice ? `<span class="pill warn">yes</span>` : `—`}</td></tr>`).join("")}</tbody></table>`
+        : `<span class="hint">None listed.</span>`}
+    </div>
+    <div class="fir-section-list">
+      <h4>Arrests (${r.arrests.length})</h4>
+      ${r.arrests.length ? `<table class="data-table"><thead><tr><th>Date</th><th>Accused</th><th>State</th><th>District</th></tr></thead>
+        <tbody>${r.arrests.map(a => `<tr><td>${escapeHtml(a.ArrestSurrenderDate||"—")}</td><td class="strong">${escapeHtml(a.AccusedName||"—")}</td><td>${escapeHtml(a.arrest_state||"—")}</td><td class="mute">${escapeHtml(a.arrest_district||"—")}</td></tr>`).join("")}</tbody></table>`
+        : `<span class="hint">No arrests recorded.</span>`}
+    </div>
+    ${r.chargesheets.length ? `<div class="fir-section-list">
+      <h4>Chargesheet</h4>
+      ${r.chargesheets.map(cs => `<span class="pill down">Type ${escapeHtml(cs.cstype)}</span> filed ${escapeHtml(cs.csdate)}`).join(" · ")}
+    </div>` : ""}
+  `;
+}
+
+// ---------------- Person Search & History ----------------------------------
+let _personWired = false;
+function wirePersonSearchOnce() {
+  if (_personWired) return; _personWired = true;
+  $("#person-search-btn").addEventListener("click", personSearch);
+  $("#person-q").addEventListener("keydown", (e) => { if (e.key === "Enter") personSearch(); });
+}
+async function personSearch() {
+  const q = $("#person-q").value.trim(); if (!q) return;
+  $("#person-detail-card").hidden = true;
+  const listEl = $("#person-results");
+  listEl.innerHTML = `<div class="hint">Searching…</div>`;
+  let r; try { r = await api(`/api/person/search?q=${encodeURIComponent(q)}`, { _key: "person-search" }); } catch { return; }
+  if (!r.results.length) { listEl.innerHTML = `<div class="empty-state">No accused matching “${escapeHtml(q)}”.</div>`; return; }
+  listEl.innerHTML = r.results.map(x => `
+    <div class="result-row" data-pid="${x.id}">
+      <div>
+        <div class="rr-main">${escapeHtml(x.name)} ${x.is_repeat ? `<span class="pill up" style="margin-left:6px">repeat</span>` : ""}</div>
+        <div class="rr-sub">${x.cases} case(s) · ${escapeHtml(x.gender||"—")} · ${escapeHtml(x.home_district||"—")}</div>
+      </div>
+      <span class="rr-badge pill info">#${x.id}</span>
+    </div>`).join("");
+  $$("#person-results .result-row").forEach(row => row.addEventListener("click", () => personDetail(row.dataset.pid)));
+}
+async function personDetail(pid) {
+  const box = $("#person-detail-card"); box.hidden = false;
+  const el = $("#person-detail");
+  el.innerHTML = `<div class="hint" style="padding:20px">Loading…</div>`;
+  let r; try { r = await api(`/api/person/${pid}`, { _key: "person-detail" }); } catch { return; }
+  const p = r.person;
+  el.innerHTML = `
+    <div class="fir-header">
+      <div>
+        <div class="fir-crimeno">${escapeHtml(p.name)}</div>
+        <div class="fir-title">Person link #${p.id} · ${p.total_cases} case(s) across ${p.distinct_subheads} sub-head(s)</div>
+      </div>
+      ${p.is_repeat ? `<div class="fir-status-badge pending">REPEAT OFFENDER</div>` : ""}
+    </div>
+    <div class="fir-grid">
+      <div class="fir-field"><label>Age</label><div class="val">${p.age ?? "—"}</div></div>
+      <div class="fir-field"><label>Gender</label><div class="val">${escapeHtml(p.gender||"—")}</div></div>
+      <div class="fir-field"><label>Home district</label><div class="val">${escapeHtml(p.home_district||"—")}</div></div>
+      <div class="fir-field"><label>First case</label><div class="val">${escapeHtml((p.first_case||"").slice(0,10))}</div></div>
+      <div class="fir-field"><label>Latest case</label><div class="val">${escapeHtml((p.latest_case||"").slice(0,10))}</div></div>
+    </div>
+    <div class="fir-section-list">
+      <h4>Criminal history (${r.cases.length} FIRs)</h4>
+      <table class="data-table"><thead><tr><th>CrimeNo</th><th>Registered</th><th>Sub-head</th><th>Class</th><th>Station</th><th>District</th><th>Status</th></tr></thead>
+        <tbody>${r.cases.map(c => `<tr>
+          <td class="strong">${escapeHtml(c.CrimeNo)}</td>
+          <td class="mute">${escapeHtml((c.reg||"").slice(0,10))}</td>
+          <td>${escapeHtml(c.subhead)}</td>
+          <td class="mute">${escapeHtml(c.class)}</td>
+          <td>${escapeHtml(c.station)}</td>
+          <td class="mute">${escapeHtml(c.district)}</td>
+          <td><span class="pill ${statusPillClass(c.status)}">${escapeHtml(c.status||"—")}</span></td>
+        </tr>`).join("")}</tbody></table>
+    </div>
+    <div class="fir-section-list">
+      <h4>Arrest history (${r.arrests.length})</h4>
+      ${r.arrests.length ? `<table class="data-table"><thead><tr><th>Date</th><th>State</th><th>District</th><th>Case</th></tr></thead>
+        <tbody>${r.arrests.map(a => `<tr><td>${escapeHtml(a.ArrestSurrenderDate||"—")}</td><td>${escapeHtml(a.state||"—")}</td><td class="mute">${escapeHtml(a.district||"—")}</td><td class="mute">${escapeHtml(a.CrimeNo||"—")}</td></tr>`).join("")}</tbody></table>` : `<span class="hint">No arrests on record.</span>`}
+    </div>
+    ${r.biometric ? `<div class="fir-section-list">
+      <h4>Biometric record</h4>
+      <div class="bio-preview">
+        ${r.biometric.face_data_url ? `<img src="${r.biometric.face_data_url}" alt="face"/>` : ""}
+        <div>
+          <div><b>Height:</b> ${r.biometric.height_cm||"—"} cm · <b>Weight:</b> ${r.biometric.weight_kg||"—"} kg</div>
+          <div><b>Build:</b> ${escapeHtml(r.biometric.build||"—")} · <b>Complexion:</b> ${escapeHtml(r.biometric.complexion||"—")}</div>
+          <div><b>Marks:</b> ${escapeHtml(r.biometric.distinguishing_marks||"—")}</div>
+        </div>
+      </div>
+    </div>` : ""}
+  `;
+}
+
+// ---------------- Biometric tab ----------------------------------------------
+let _bioWired = false;
+function wireBiometricOnce() {
+  if (_bioWired) return; _bioWired = true;
+
+  // Sub-tabs
+  $$(".bio-tab").forEach(t => t.addEventListener("click", () => {
+    $$(".bio-tab").forEach(x => x.classList.remove("active"));
+    t.classList.add("active");
+    const p = t.dataset.biotab;
+    $$('[data-biopanel]').forEach(el => el.hidden = el.dataset.biopanel !== p);
+  }));
+
+  // File → data URL preview helpers
+  const readAsDataURL = (file) => new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(r.result); r.onerror = rej;
+    r.readAsDataURL(file);
+  });
+  async function bindPreview(fileInput, previewSel) {
+    const file = fileInput.files[0]; if (!file) return null;
+    const url = await readAsDataURL(file);
+    $(previewSel).innerHTML = `<div class="bio-preview"><img src="${url}"/><div class="mono" style="font-size:11px;color:var(--text-mute)">${escapeHtml(file.name)} · ${(file.size/1024).toFixed(1)} KB</div></div>`;
+    return url;
+  }
+
+  // Enroll form
+  let faceURL = null, fpURL = null;
+  $("#bio-face-file").addEventListener("change", async (e) => { faceURL = await bindPreview(e.target, "#bio-face-preview"); });
+  $("#bio-fp-file").addEventListener("change", async (e) => { fpURL   = await bindPreview(e.target, "#bio-fp-preview"); });
+  $("#bio-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const f = new FormData($("#bio-form"));
+    const body = Object.fromEntries(f.entries());
+    body.face_data_url = faceURL;
+    body.fingerprint_data_url = fpURL;
+    if (body.person_link_id) body.person_link_id = parseInt(body.person_link_id, 10) || null;
+    if (body.height_cm) body.height_cm = parseInt(body.height_cm, 10);
+    if (body.weight_kg) body.weight_kg = parseInt(body.weight_kg, 10);
+    const err = $("#bio-err"); err.hidden = true;
+    try {
+      const r = await api("/api/biometrics", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body), _key: "bio-enroll",
+      });
+      toast(`Saved biometric record #${r.biometric_id}`, "info");
+      $("#bio-form").reset(); faceURL = null; fpURL = null;
+      $("#bio-face-preview").textContent = "No face image chosen.";
+      $("#bio-fp-preview").textContent = "No fingerprint image chosen.";
+    } catch (ex) { err.textContent = String(ex.message || ex); err.hidden = false; }
+  });
+
+  // Physical-description search
+  $("#bs-search").addEventListener("click", async () => {
+    const qs = new URLSearchParams();
+    for (const [id, k] of [["bs-name","name"],["bs-build","build"],["bs-complexion","complexion"],["bs-marks","marks"],["bs-min","min_height"],["bs-max","max_height"]]) {
+      const v = $("#" + id).value.trim();
+      if (v) qs.append(k, v);
+    }
+    const r = await api("/api/biometrics/search?" + qs.toString(), { _key: "bio-search" });
+    const el = $("#bs-results");
+    if (!r.results.length) { el.innerHTML = `<div class="empty-state">No enrolled subjects match.</div>`; return; }
+    el.innerHTML = r.results.map(m => bioMatchCard(m, null)).join("");
+  });
+
+  // Face similarity
+  $("#face-match-file").addEventListener("change", async (e) => {
+    const url = await bindPreview(e.target, "#face-match-preview");
+    if (!url) return;
+    const r = await api("/api/biometrics/match", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind: "face", data_url: url, limit: 12 }), _key: "face-match",
+    });
+    const el = $("#face-match-results");
+    if (!r.matches.length) { el.innerHTML = `<div class="empty-state">No enrolled face images yet. Add some in the Enroll tab.</div>`; return; }
+    el.innerHTML = r.matches.map(m => bioMatchCard(m, m.similarity)).join("");
+  });
+
+  // Fingerprint similarity
+  $("#fp-match-file").addEventListener("change", async (e) => {
+    const url = await bindPreview(e.target, "#fp-match-preview");
+    if (!url) return;
+    const r = await api("/api/biometrics/match", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind: "fingerprint", data_url: url, limit: 12 }), _key: "fp-match",
+    });
+    const el = $("#fp-match-results");
+    if (!r.matches.length) { el.innerHTML = `<div class="empty-state">No enrolled fingerprint images yet.</div>`; return; }
+    el.innerHTML = r.matches.map(m => bioMatchCard(m, m.similarity)).join("");
+  });
+}
+function bioMatchCard(m, similarity) {
+  const img = m.img || m.face_data_url || null;
+  return `<div class="bio-match">
+    ${img ? `<img src="${img}" alt="biometric"/>` : `<div style="aspect-ratio:1;background:var(--panel-2);border-radius:6px;display:grid;place-items:center;color:var(--text-mute);font-size:22px">?</div>`}
+    <div class="name">${escapeHtml(m.accused_name || "—")}</div>
+    ${similarity != null ? `<div class="sim">Similarity ${(similarity*100).toFixed(1)}%</div>` : ""}
+    <div class="meta">${m.height_cm ? m.height_cm + " cm · " : ""}${escapeHtml(m.build||"")}${m.complexion ? " · " + escapeHtml(m.complexion) : ""}</div>
+    ${m.distinguishing_marks ? `<div class="meta">${escapeHtml(m.distinguishing_marks)}</div>` : ""}
+  </div>`;
+}
+
+// ---------------- Profile ---------------------------------------------------
+async function loadProfile() {
+  let r; try { r = await api("/api/officer/me", { _key: "profile" }); } catch { return; }
+  const p = r.profile;
+  const initials = (p.full_name || p.email || "?").trim().split(/\s+/).slice(0, 2).map(s => s[0]).join("").toUpperCase();
+  const av = $("#profile-avatar");
+  if (p.photo_data_url) av.innerHTML = `<img src="${p.photo_data_url}" alt="photo"/>`;
+  else av.textContent = initials;
+  $("#profile-name").textContent = p.full_name || "—";
+  $("#profile-rank").textContent = [p.rank_name, p.designation].filter(Boolean).join(" · ") || "—";
+  $("#profile-kgid-line").textContent = p.kgid ? `KGID ${p.kgid}` : "—";
+  $("#pf-name").textContent = p.full_name || "—";
+  $("#pf-kgid").textContent = p.kgid || "—";
+  $("#pf-rank").textContent = p.rank_name || "—";
+  $("#pf-desig").textContent = p.designation || "—";
+  $("#pf-unit").textContent = p.unit_name || "—";
+  $("#pf-district").textContent = p.district_name || "—";
+  $("#pf-email").textContent = p.email || "—";
+  $("#pf-phone").value = p.phone || "";
+  $("#pf-bio").value = p.bio || "";
+  $("#pf-appt").textContent = p.appointment_date || "—";
+  $("#pf-dob").textContent  = p.date_of_birth  || "—";
+}
+document.addEventListener("click", async (e) => {
+  if (e.target.id === "pf-save") {
+    const body = { phone: $("#pf-phone").value.trim(), bio: $("#pf-bio").value.trim() };
+    try { await api("/api/officer/me", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }); toast("Profile saved", "info"); } catch {}
+  }
+});
+document.addEventListener("change", async (e) => {
+  if (e.target.id === "profile-photo-file") {
+    const f = e.target.files[0]; if (!f) return;
+    if (f.size > 500 * 1024) { toast("Photo must be under 500KB", "warn"); return; }
+    const url = await new Promise(res => { const r = new FileReader(); r.onload = () => res(r.result); r.readAsDataURL(f); });
+    try { await api("/api/officer/me", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ photo_data_url: url }) }); toast("Photo uploaded", "info"); loadProfile(); } catch {}
+  }
+});
 
 document.addEventListener("DOMContentLoaded", bootstrap);

@@ -26,10 +26,14 @@
       <button class="nav-item" data-tab="geo"><span class="nav-icon ni-geo"></span><span>Geospatial</span></button>
       <button class="nav-item" data-tab="predict"><span class="nav-icon ni-predict"></span><span>Predict</span></button>
       <button class="nav-item" data-tab="network"><span class="nav-icon ni-network"></span><span>Network</span></button>
+      <button class="nav-item" data-tab="caselookup"><span class="nav-icon ni-caselookup"></span><span>Case Lookup</span></button>
+      <button class="nav-item" data-tab="personsearch"><span class="nav-icon ni-personsearch"></span><span>Person Search</span></button>
+      <button class="nav-item" data-tab="biometric"><span class="nav-icon ni-biometric"></span><span>Biometric ID</span></button>
       <button class="nav-item" data-tab="crossborder"><span class="nav-icon ni-crossborder"></span><span>Cross-border</span></button>
       <button class="nav-item" data-tab="laworder"><span class="nav-icon ni-laworder"></span><span>Law &amp; Order</span></button>
       <button class="nav-item" data-tab="anomaly"><span class="nav-icon ni-anomaly"></span><span>Anomalies</span></button>
       <button class="nav-item" data-tab="assistant"><span class="nav-icon ni-assistant"></span><span>AI Assistant</span></button>
+      <button class="nav-item" data-tab="profile"><span class="nav-icon ni-profile"></span><span>My Profile</span></button>
     </nav>
     <div class="sidebar-footer">
       <div class="sidebar-badge">
@@ -236,6 +240,204 @@
                 <thead><tr><th>Category</th><th>Class</th><th class="num">Prior</th><th class="num">Recent</th><th class="num">Growth</th></tr></thead>
                 <tbody></tbody>
               </table>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- CASE LOOKUP -->
+      <section class="tab-panel" data-panel="caselookup">
+        <div class="lookup-shell">
+          <div class="card">
+            <div class="card-head"><h3>Case & FIR Lookup</h3><span class="hint">Search by CrimeNo, Case No, accused or victim name</span></div>
+            <div class="card-body">
+              <div class="lookup-search">
+                <input type="text" id="case-q" placeholder="e.g. 104306202600001, Rekha Reddy, or a CrimeNo…" />
+                <button id="case-search-btn" class="btn btn-primary">Search</button>
+              </div>
+              <div class="lookup-results" id="case-results"></div>
+            </div>
+          </div>
+          <div class="card" id="case-detail-card" hidden>
+            <div id="case-detail"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- PERSON SEARCH -->
+      <section class="tab-panel" data-panel="personsearch">
+        <div class="lookup-shell">
+          <div class="card">
+            <div class="card-head"><h3>Person Search & Criminal History</h3><span class="hint">Look up an accused across FIRs, arrests and jurisdictions</span></div>
+            <div class="card-body">
+              <div class="lookup-search">
+                <input type="text" id="person-q" placeholder="Enter accused name…" />
+                <button id="person-search-btn" class="btn btn-primary">Search</button>
+              </div>
+              <div class="lookup-results" id="person-results"></div>
+            </div>
+          </div>
+          <div class="card" id="person-detail-card" hidden>
+            <div id="person-detail"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- BIOMETRIC ID -->
+      <section class="tab-panel" data-panel="biometric">
+        <div class="bio-shell">
+          <div class="pilot-note">
+            <b>Pilot reference implementation.</b> Fingerprint and face matching below use a perceptual-hash approximation for demonstration.
+            For evidentiary use, this integrates with <b>NAFIS</b> (NCRB) and a DPDPA-compliant face-recognition vendor.
+          </div>
+          <div class="bio-tabs">
+            <button class="bio-tab active" data-biotab="capture">Enroll biometric</button>
+            <button class="bio-tab" data-biotab="physical">Search by description</button>
+            <button class="bio-tab" data-biotab="face">Face similarity</button>
+            <button class="bio-tab" data-biotab="fingerprint">Fingerprint similarity</button>
+          </div>
+
+          <!-- Enroll -->
+          <div class="card" data-biopanel="capture">
+            <div class="card-head"><h3>Enroll a subject's biometric record</h3></div>
+            <div class="card-body">
+              <form id="bio-form" class="auth-form" novalidate>
+                <div class="two-col">
+                  <label>Accused name<input type="text" name="accused_name" required /></label>
+                  <label>Person ID (optional)<input type="text" name="person_link_id" placeholder="if linking existing" /></label>
+                </div>
+                <div class="two-col">
+                  <label>Height (cm)<input type="number" name="height_cm" min="120" max="220" /></label>
+                  <label>Weight (kg)<input type="number" name="weight_kg" min="30" max="200" /></label>
+                </div>
+                <div class="two-col">
+                  <label>Build
+                    <select name="build">
+                      <option value="">—</option><option>Slim</option><option>Medium</option><option>Athletic</option><option>Heavy</option>
+                    </select>
+                  </label>
+                  <label>Complexion
+                    <select name="complexion">
+                      <option value="">—</option><option>Fair</option><option>Wheatish</option><option>Medium</option><option>Dark</option>
+                    </select>
+                  </label>
+                </div>
+                <div class="two-col">
+                  <label>Hair<input type="text" name="hair" placeholder="e.g. black, short" /></label>
+                  <label>Eye color<input type="text" name="eye_color" /></label>
+                </div>
+                <label>Distinguishing marks<input type="text" name="distinguishing_marks" placeholder="scars, tattoos, birthmarks" /></label>
+                <label>Notes<input type="text" name="notes" /></label>
+
+                <label class="upload-btn">
+                  <input type="file" id="bio-face-file" accept="image/*" />
+                  Upload / capture face photo
+                </label>
+                <div id="bio-face-preview" class="hint">No face image chosen.</div>
+
+                <label class="upload-btn">
+                  <input type="file" id="bio-fp-file" accept="image/*" />
+                  Upload fingerprint image
+                </label>
+                <div id="bio-fp-preview" class="hint">No fingerprint image chosen.</div>
+
+                <button type="submit" class="btn btn-primary btn-block">Save biometric record</button>
+                <div class="auth-error" id="bio-err" hidden></div>
+              </form>
+            </div>
+          </div>
+
+          <!-- Physical description -->
+          <div class="card" data-biopanel="physical" hidden>
+            <div class="card-head"><h3>Search by physical description</h3></div>
+            <div class="card-body">
+              <div class="two-col">
+                <label>Name (partial)<input type="text" id="bs-name" /></label>
+                <label>Build
+                  <select id="bs-build"><option value="">Any</option><option>Slim</option><option>Medium</option><option>Athletic</option><option>Heavy</option></select>
+                </label>
+              </div>
+              <div class="two-col">
+                <label>Complexion
+                  <select id="bs-complexion"><option value="">Any</option><option>Fair</option><option>Wheatish</option><option>Medium</option><option>Dark</option></select>
+                </label>
+                <label>Marks (partial)<input type="text" id="bs-marks" /></label>
+              </div>
+              <div class="two-col">
+                <label>Min height (cm)<input type="number" id="bs-min" /></label>
+                <label>Max height (cm)<input type="number" id="bs-max" /></label>
+              </div>
+              <button id="bs-search" class="btn btn-primary" style="margin-top:12px">Search</button>
+              <div class="bio-matches" id="bs-results" style="margin-top:14px"></div>
+            </div>
+          </div>
+
+          <!-- Face similarity -->
+          <div class="card" data-biopanel="face" hidden>
+            <div class="card-head"><h3>Face similarity</h3><span class="hint">Upload a face image to find nearest enrolled subjects</span></div>
+            <div class="card-body">
+              <label class="upload-btn">
+                <input type="file" id="face-match-file" accept="image/*" />
+                Upload face image
+              </label>
+              <div id="face-match-preview" class="hint">No image chosen.</div>
+              <div class="bio-matches" id="face-match-results" style="margin-top:14px"></div>
+            </div>
+          </div>
+
+          <!-- Fingerprint similarity -->
+          <div class="card" data-biopanel="fingerprint" hidden>
+            <div class="card-head"><h3>Fingerprint similarity</h3><span class="hint">Upload a fingerprint image to find nearest enrolled subjects</span></div>
+            <div class="card-body">
+              <label class="upload-btn">
+                <input type="file" id="fp-match-file" accept="image/*" />
+                Upload fingerprint
+              </label>
+              <div id="fp-match-preview" class="hint">No image chosen.</div>
+              <div class="bio-matches" id="fp-match-results" style="margin-top:14px"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- PROFILE -->
+      <section class="tab-panel" data-panel="profile">
+        <div class="profile-grid">
+          <div class="card profile-card">
+            <div class="profile-avatar" id="profile-avatar">?</div>
+            <div class="profile-name" id="profile-name">—</div>
+            <div class="profile-rank" id="profile-rank">—</div>
+            <div class="profile-kgid" id="profile-kgid-line">KGID —</div>
+            <div class="profile-actions">
+              <label class="upload-btn">
+                <input type="file" id="profile-photo-file" accept="image/*" />
+                Upload photo
+              </label>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-head"><h3>Officer details</h3><span class="hint">Read-only fields come from the KSP roster</span></div>
+            <div class="card-body">
+              <div class="profile-fields">
+                <div class="profile-field"><label>Full name</label><div class="val" id="pf-name">—</div></div>
+                <div class="profile-field"><label>KGID</label><div class="val" id="pf-kgid">—</div></div>
+                <div class="profile-field"><label>Rank</label><div class="val" id="pf-rank">—</div></div>
+                <div class="profile-field"><label>Designation</label><div class="val" id="pf-desig">—</div></div>
+                <div class="profile-field"><label>Unit</label><div class="val" id="pf-unit">—</div></div>
+                <div class="profile-field"><label>District</label><div class="val" id="pf-district">—</div></div>
+                <div class="profile-field"><label>E-mail</label><div class="val" id="pf-email">—</div></div>
+                <div class="profile-field">
+                  <label>Phone</label>
+                  <input type="tel" id="pf-phone" placeholder="e.g. +91 98xxxxxxx" />
+                </div>
+                <div class="profile-field">
+                  <label>Bio / notes</label>
+                  <input type="text" id="pf-bio" placeholder="short bio, current focus, etc." />
+                </div>
+                <div class="profile-field"><label>Appointment date</label><div class="val" id="pf-appt">—</div></div>
+                <div class="profile-field"><label>Date of birth</label><div class="val" id="pf-dob">—</div></div>
+                <button id="pf-save" class="btn btn-primary" style="margin-top:8px; align-self:flex-start">Save changes</button>
+              </div>
             </div>
           </div>
         </div>
