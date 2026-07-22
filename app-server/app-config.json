@@ -1,0 +1,15 @@
+{
+  "name": "ksp-cip-server",
+  "stack": "python3_12",
+  "memory": 1024,
+  "buildPath": ".",
+  "command": "sh -c 'sh ./start.sh'",
+  "env_variables": {
+    "KSP_DB": "/tmp/ksp.db",
+    "KSP_FIRS_ON_BOOT": "20000",
+    "PYTHONUNBUFFERED": "1"
+  },
+  "scripts": {
+    "predeploy": "python3 -m pip install --no-cache-dir -t . -r requirements.txt"
+  }
+}

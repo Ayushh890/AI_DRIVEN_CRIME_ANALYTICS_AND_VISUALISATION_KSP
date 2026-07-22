@@ -207,6 +207,74 @@ ollama create ksp-sql -f Modelfile   # Modelfile: FROM ./models/ksp-sql.gguf
 export KSP_LLM_MODEL=ksp-sql
 ```
 
+## Deploying to Zoho Catalyst
+
+The pilot is packaged for **Catalyst AppSail** (Zoho's containerized service
+tier). The `app-server/` directory is the self-contained deployable — sync
+your latest source into it with `./build-catalyst.sh` before every deploy.
+
+### One-time setup
+
+```bash
+# 1. Install the CLI (requires Node.js).
+npm install -g zcatalyst-cli
+
+# 2. Log in with your Zoho account (opens a browser).
+catalyst login
+
+# 3. Bind this working directory to a Catalyst project.
+catalyst init
+#   Choose:  Existing project (or Create new)
+#   Choose:  AppSail  → Python_3_1x → Catalyst-Managed Runtime
+```
+
+`catalyst init` overwrites `catalyst.json` with your real `projectId`. Commit
+the updated file so teammates can `catalyst deploy` too.
+
+### Deploy
+
+```bash
+./build-catalyst.sh --deploy
+# equivalent to: ./build-catalyst.sh && catalyst deploy
+```
+
+After the first deploy the CLI prints the public URL (something like
+`https://ksp-cip-server-<id>.catalystserverless.com`). Open that URL and the
+dashboard loads.
+
+### What happens on Catalyst
+
+1. `catalyst deploy` uploads `app-server/` (source + `app-config.json`).
+2. Catalyst runs the `predeploy` hook — `pip install -t .` — which vendors
+   FastAPI / uvicorn / networkx / httpx into the build directory.
+3. On cold start, the container executes `start.sh`, which:
+   - Regenerates the synthetic SQLite DB at `/tmp/ksp.db` (AppSail filesystems
+     are ephemeral; `/tmp` is writable per-container).
+   - Boots uvicorn on the port Catalyst provides via
+     `X_ZOHO_CATALYST_LISTEN_PORT`.
+
+Cold-start DB regeneration takes ~10s for 20k FIRs. To ship a smaller /
+larger DB, edit `KSP_FIRS_ON_BOOT` in `app-server/app-config.json`.
+
+### For production data
+
+Do **NOT** rely on the ephemeral `/tmp/ksp.db` for real KSP data — the
+filesystem is wiped across redeploys and scaling events. Migrate to one of:
+
+* **Catalyst Data Store** — relational, queried via ZCQL. Requires porting
+  the schema/ingest to Catalyst's SQL dialect.
+* **Catalyst File Store / Stratus** — bulk upload a real SQLite DB and mount
+  it read-only. Simplest path if you just want to promote a curated dataset.
+* **External PostgreSQL / PostGIS** — the recommended long-term option; the
+  ORM layer in `backend/` is trivially portable (SQL is standard).
+
+### Custom domain & CORS
+
+* Domain mappings: **Cloud Scale → Domain Mappings** in the console; requires
+  a free Zoho Group SSL certificate (~48h to issue) and a CNAME record.
+* Cross-origin whitelist: **Authentication → Whitelisted Domains** (not code-
+  configured).
+
 ## Phase 2 roadmap
 
 1. **CCTNS live ingest** — nightly delta + incremental baseline updates.

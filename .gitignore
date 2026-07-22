@@ -1,6 +1,12 @@
 # Generated DB (rebuild via ./run.sh --rebuild)
 data/*.db
 data/*.db-journal
+app-server/data/*.db
+app-server/data/*.db-journal
+
+# Catalyst-managed
+.catalyst-deploy/
+.catalyst_temp*
 
 # Runtime artifacts
 .ksp.pid
