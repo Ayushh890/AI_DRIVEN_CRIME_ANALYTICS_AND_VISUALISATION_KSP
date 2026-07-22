@@ -8,6 +8,9 @@ app-server/data/*.db-journal
 .catalyst-deploy/
 .catalyst_temp*
 
+# Deploy-time secrets (API keys)
+.env.deploy
+
 # Runtime artifacts
 .ksp.pid
 .ksp.log
@@ -26,21 +29,23 @@ venv/
 .vscode/
 *.swp
 
-# Catalyst predeploy artifacts (installed into app-server/ by pip -t .)
-app-server/fastapi*
-app-server/starlette*
-app-server/pydantic*
-app-server/uvicorn*
-app-server/httpx*
-app-server/httpcore*
-app-server/anyio*
-app-server/sniffio*
-app-server/networkx*
-app-server/annotated_types*
-app-server/certifi*
-app-server/click*
-app-server/h11*
-app-server/idna*
-app-server/typing_extensions*
-app-server/bin/
-.env.deploy
+# app-server/ is a build directory managed by build-catalyst.sh.
+# Everything inside it is vendored / regenerated except the tiny set of
+# hand-authored files we allowlist below. This keeps pip-installed deps
+# (uvicorn/fastapi/pydantic/etc.) out of git while still committing the
+# source we own.
+app-server/*
+!app-server/app-config.json
+!app-server/start.sh
+!app-server/requirements.txt
+!app-server/backend
+!app-server/backend/**
+!app-server/frontend
+!app-server/frontend/**
+!app-server/data
+!app-server/data/schema.sql
+!app-server/scripts
+!app-server/scripts/generate_data.py
+
+# But do exclude pycache anywhere it appears
+**/__pycache__/
