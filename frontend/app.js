@@ -1,35 +1,72 @@
 // KSP CIP dashboard — SPA controller.
-const $  = (s) => document.querySelector(s);
-const $$ = (s) => Array.from(document.querySelectorAll(s));
+//
+// Design notes:
+//   * Every tab loads on activation, not on bootstrap — first paint is instant.
+//   * Filter strip is contextual (visible only on tabs where filters apply).
+//   * All API calls go through api() which surfaces toasts on error and
+//     preserves per-request AbortController so tab-switching cancels stale
+//     requests instead of racing.
+//   * Tables render via renderTable(bodySel, rows, fn) — one function, one
+//     truthy consistent look.
+
+const $  = (s, root = document) => root.querySelector(s);
+const $$ = (s, root = document) => Array.from(root.querySelectorAll(s));
+
+const CLASS_COLORS = {
+  "Property Crimes":     "var(--c-property)",
+  "Crimes Against Body": "var(--c-body)",
+  "Crimes Against Women":"var(--c-women)",
+  "Economic Offences":   "var(--c-economic)",
+  "Cyber Crimes":        "var(--c-cyber)",
+  "Narcotic Offences":   "var(--c-narcotic)",
+  "Traffic Offences":    "var(--c-traffic)",
+  "Other IPC":           "var(--c-other)",
+};
+// Resolve CSS var to hex once — Chart.js can't parse `var(--x)`.
+function cssColor(key) {
+  const v = CLASS_COLORS[key] || "var(--c-other)";
+  if (!v.startsWith("var(")) return v;
+  const name = v.slice(4, -1).trim();
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || "#94a3b8";
+}
+function colorFor(className) { return cssColor(className); }
 
 const state = {
   meta: null,
   filters: {},
   charts: {},
-  maps: {},        // { geo: L.Map, predict: L.Map, cb: L.Map }
-  mapLayers: {},   // per map
-  currentLayer: "heatmap",
-  offenderNet: null,
+  maps: {},         // { geo, predict, cb }
+  mapLayers: {},    // { geo: {heat, points, districts}, ... }
+  currentGeoLayer: "heatmap",
   currentNetTab: "offenders",
+  offenderNet: null,
+  loadedTabs: new Set(),
+  tabsWithFilters: new Set(["overview", "geo"]),
+  aborts: {},       // per-tab AbortController
+  currentTab: "overview",
 };
 
-const CLASS_COLORS = {
-  "Property Crimes":     "#58a6ff",
-  "Crimes Against Body": "#f85149",
-  "Crimes Against Women":"#f0883e",
-  "Economic Offences":   "#3fb950",
-  "Cyber Crimes":        "#a371f7",
-  "Narcotic Offences":   "#e3b341",
-  "Traffic Offences":    "#7ee787",
-  "Other IPC":           "#8b949e",
-};
-const nodeGroupColor = (cls) => CLASS_COLORS[cls] || "#8b949e";
-
-// ----------------------------------- fetch --------------------------------------
-async function api(path, opts) {
-  const r = await fetch(path, opts);
-  if (!r.ok) throw new Error(`${path} ${r.status}`);
-  return r.json();
+// -------------------- fetch layer with abort + toast ----------------------
+async function api(path, opts = {}) {
+  const ctrl = new AbortController();
+  const key = opts._key || "global";
+  if (state.aborts[key]) state.aborts[key].abort();
+  state.aborts[key] = ctrl;
+  try {
+    const r = await fetch(path, { ...opts, signal: ctrl.signal });
+    if (!r.ok) throw new Error(`HTTP ${r.status} ${path}`);
+    return await r.json();
+  } catch (e) {
+    if (e.name !== "AbortError") toast(String(e.message || e), "err");
+    throw e;
+  }
+}
+function toast(msg, kind = "info") {
+  const host = $("#toast-host"); if (!host) return;
+  const el = document.createElement("div");
+  el.className = `toast ${kind}`; el.textContent = msg;
+  host.appendChild(el);
+  setTimeout(() => { el.style.opacity = "0"; setTimeout(() => el.remove(), 200); }, 4000);
 }
 function qs(params) {
   const p = new URLSearchParams();
@@ -41,81 +78,100 @@ function qs(params) {
 }
 function currentFilterQS(extra = {}) { return qs({ ...state.filters, ...extra }); }
 
-// ----------------------------------- bootstrap --------------------------------------
+// -------------------- bootstrap -------------------------------------------
 async function bootstrap() {
-  const meta = await api("/meta");
-  state.meta = meta;
-  populateFilters(meta);
-  $("#date-range").textContent =
-    `data window: ${meta.date_range.min.slice(0,10)} → ${meta.date_range.max.slice(0,10)}`;
-  wireTabs();
-  wireFilters();
-  wireMapControls();
-  wireNetTabs();
-  wirePredictControls();
-  wireAssistant();
-  wireCrossborderTab();
-  await refreshOverviewAndGeo();
-  // Show LLM backend indicator.
+  wireStaticUI();
+  try {
+    const meta = await api("/meta", { _key: "meta" });
+    state.meta = meta;
+    populateFilters(meta);
+    $("#conn-dot").className = "dot ok";
+    $("#conn-text").textContent = "Connected";
+    $("#data-window").textContent =
+      `data: ${meta.date_range.min.slice(0,10)} → ${meta.date_range.max.slice(0,10)}`;
+  } catch (e) {
+    $("#conn-dot").className = "dot err";
+    $("#conn-text").textContent = "Disconnected";
+    return;
+  }
+  await switchTab("overview");
   api("/assistant/health").then((h) => {
-    $("#assistant-backend").textContent = `· backend: ${h.backend}`;
-  });
+    const backend = h.backend || "offline";
+    const el = $("#assistant-backend");
+    if (el) el.textContent = `backend: ${backend}`;
+  }).catch(() => {});
 }
+function wireStaticUI() {
+  // Sidebar nav
+  $$(".nav-item").forEach(item => {
+    item.addEventListener("click", () => switchTab(item.dataset.tab));
+  });
+  $("#menu-toggle")?.addEventListener("click", () => $("#sidebar").classList.toggle("open"));
 
-function populateFilters(meta) {
-  const dSel = $("#f-district");
-  meta.districts.forEach((d) => {
-    const o = document.createElement("option");
-    o.value = d.id; o.textContent = d.name; dSel.appendChild(o);
+  // Filter strip
+  $("#f-apply").addEventListener("click", () => { readFilters(); refreshCurrentTab(true); });
+  $("#f-reset").addEventListener("click", () => {
+    if (!state.meta) return;
+    $("#f-from").value = state.meta.date_range.min.slice(0,10);
+    $("#f-to").value   = state.meta.date_range.max.slice(0,10);
+    $("#f-district").value = ""; $("#f-class").value = ""; $("#f-subhead").value = "";
+    readFilters(); refreshCurrentTab(true);
   });
-  const cls = new Set(meta.crime_subheads.map((s) => s.head_name));
-  const clsSel = $("#f-class");
-  Array.from(cls).sort().forEach((k) => {
-    const o = document.createElement("option");
-    o.value = k; o.textContent = k; clsSel.appendChild(o);
-  });
-  const sub = $("#f-subhead");
-  meta.crime_subheads.forEach((s) => {
-    const o = document.createElement("option");
-    o.value = s.id; o.textContent = `${s.name} — ${s.head_name}`;
-    sub.appendChild(o);
-  });
-  $("#f-from").value = meta.date_range.min.slice(0, 10);
-  $("#f-to").value   = meta.date_range.max.slice(0, 10);
 
-  // Predict tab selects.
-  const predHead = $("#predict-head");
-  const fcstHead = $("#fcst-head");
-  meta.crime_heads.forEach((h) => {
-    const o1 = document.createElement("option"); o1.value = h.id; o1.textContent = h.name; predHead.appendChild(o1);
-    const o2 = document.createElement("option"); o2.value = h.id; o2.textContent = h.name; fcstHead.appendChild(o2);
-  });
-  const fcstDist = $("#fcst-district");
-  meta.districts.forEach((d) => {
-    const o = document.createElement("option"); o.value = d.id; o.textContent = d.name; fcstDist.appendChild(o);
-  });
-}
-
-// ----------------------------------- tabs --------------------------------------
-function wireTabs() {
-  $$(".tab").forEach((t) => {
-    t.addEventListener("click", () => {
-      $$(".tab").forEach((x) => x.classList.remove("active"));
-      t.classList.add("active");
-      const id = t.dataset.tab;
-      $$(".panel").forEach((p) => p.classList.add("hidden"));
-      $(`#tab-${id}`).classList.remove("hidden");
-      window.dispatchEvent(new Event("resize"));
-      if (id === "geo")         { ensureMap("geo").invalidateSize(); loadGeo(); }
-      if (id === "predict")     { ensureMap("predict").invalidateSize(); loadPredictMap(); }
-      if (id === "network")     { loadNetTab(); }
-      if (id === "crossborder") { ensureMap("cb").invalidateSize(); loadCrossborder(); }
-      if (id === "laworder")    { loadLawOrder(); }
-      if (id === "anomaly")     { loadAnomaliesAndTrends(); }
+  // Geospatial layer chips
+  $$('input[name="layer"]').forEach(input => {
+    input.addEventListener("change", () => {
+      state.currentGeoLayer = input.value;
+      $$(".chip[data-layer]").forEach(c => c.classList.toggle("active", c.dataset.layer === input.value));
+      drawGeoLayer();
     });
   });
-}
 
+  // Predict controls
+  $("#predict-refresh").addEventListener("click", loadPredictMap);
+  $("#predict-horizon").addEventListener("change", loadPredictMap);
+  $("#predict-head").addEventListener("change", loadPredictMap);
+  $("#fcst-run").addEventListener("click", loadForecastChart);
+
+  // Network mini-tabs
+  $$(".mini-tab").forEach(t => {
+    t.addEventListener("click", () => {
+      $$(".mini-tab").forEach(x => x.classList.remove("active"));
+      t.classList.add("active");
+      state.currentNetTab = t.dataset.nettab;
+      loadNetworkList();
+    });
+  });
+
+  // Assistant
+  $("#assistant-ask").addEventListener("click", assistantAsk);
+  $("#assistant-q").addEventListener("keydown", (e) => { if (e.key === "Enter") assistantAsk(); });
+  $$(".assistant-suggestions .chip").forEach(c => c.addEventListener("click", () => {
+    $("#assistant-q").value = c.textContent.trim(); assistantAsk();
+  }));
+}
+function populateFilters(meta) {
+  const dSel = $("#f-district");
+  meta.districts.forEach(d => { const o = document.createElement("option"); o.value = d.id; o.textContent = d.name; dSel.appendChild(o); });
+  const cls = new Set(meta.crime_subheads.map(s => s.head_name));
+  const clsSel = $("#f-class");
+  Array.from(cls).sort().forEach(k => { const o = document.createElement("option"); o.value = k; o.textContent = k; clsSel.appendChild(o); });
+  const sub = $("#f-subhead");
+  meta.crime_subheads.forEach(s => { const o = document.createElement("option"); o.value = s.id; o.textContent = `${s.name} — ${s.head_name}`; sub.appendChild(o); });
+  $("#f-from").value = meta.date_range.min.slice(0, 10);
+  $("#f-to").value   = meta.date_range.max.slice(0, 10);
+  readFilters();
+
+  // Predict + forecast selects
+  const predHead = $("#predict-head");
+  const fcstHead = $("#fcst-head");
+  meta.crime_heads.forEach(h => {
+    predHead.appendChild(new Option(h.name, h.id));
+    fcstHead.appendChild(new Option(h.name, h.id));
+  });
+  const fcstDist = $("#fcst-district");
+  meta.districts.forEach(d => fcstDist.appendChild(new Option(d.name, d.id)));
+}
 function readFilters() {
   state.filters = {
     from:     $("#f-from").value || undefined,
@@ -125,177 +181,212 @@ function readFilters() {
     subhead:  $("#f-subhead").value || undefined,
   };
 }
-function wireFilters() {
-  $("#f-apply").addEventListener("click", async () => { readFilters(); await refreshOverviewAndGeo(); });
-  $("#f-reset").addEventListener("click", async () => {
-    $("#f-from").value = state.meta.date_range.min.slice(0,10);
-    $("#f-to").value   = state.meta.date_range.max.slice(0,10);
-    $("#f-district").value = ""; $("#f-class").value = ""; $("#f-subhead").value = "";
-    readFilters(); await refreshOverviewAndGeo();
-  });
+
+// -------------------- tabs -----------------------------------------------
+async function switchTab(id) {
+  state.currentTab = id;
+  $$(".nav-item").forEach(n => n.classList.toggle("active", n.dataset.tab === id));
+  $$(".tab-panel").forEach(p => p.classList.toggle("active", p.dataset.panel === id));
+  $("#tab-title").textContent = ({
+    overview: "Overview",
+    geo: "Geospatial",
+    predict: "Predictive analytics",
+    network: "Criminal network",
+    crossborder: "Cross-border crime",
+    laworder: "Law & Order",
+    anomaly: "Anomalies & emerging trends",
+    assistant: "AI assistant",
+  })[id] || id;
+  const filterStrip = $("#filter-strip");
+  filterStrip.setAttribute("data-visible", state.tabsWithFilters.has(id) ? "1" : "0");
+  await refreshCurrentTab(false);
+}
+async function refreshCurrentTab(force) {
+  const id = state.currentTab;
+  if (!force && state.loadedTabs.has(id) && id !== "overview" && id !== "geo") return;
+  state.loadedTabs.add(id);
+  if (id === "overview")    await loadOverview();
+  if (id === "geo")         await loadGeoTab();
+  if (id === "predict")     await loadPredictTab();
+  if (id === "network")     await loadNetworkList();
+  if (id === "crossborder") await loadCrossborder();
+  if (id === "laworder")    await loadLawOrder();
+  if (id === "anomaly")     await loadAnomaliesAndTrends();
 }
 
-async function refreshOverviewAndGeo() {
-  $("#status-badge").textContent = "Loading…";
-  readFilters();
-  try {
-    await Promise.all([loadStats(), loadGeo()]);
-    $("#status-badge").textContent = "Ready";
-  } catch (e) { console.error(e); $("#status-badge").textContent = "Error"; }
-}
-
-// ----------------------------------- overview --------------------------------------
-async function loadStats() {
-  const s = await api(`/stats${currentFilterQS()}`);
+// -------------------- OVERVIEW -------------------------------------------
+async function loadOverview() {
+  showKpiSkeleton();
+  let s;
+  try { s = await api(`/stats${currentFilterQS()}`, { _key: "stats" }); } catch { return; }
   renderKpis(s);
-  renderMonthChart(s.by_month);
-  renderClassChart(s.by_class);
-  renderHourChart(s.by_hour);
-  renderCategoryChart(s.by_category);
-  renderGravityChart(s.by_gravity);
-  renderStatusChart(s.by_status);
+  makeChart("month", "chart-month", monthChartCfg(s.by_month));
+  makeChart("class", "chart-class", classDonutCfg(s.by_class));
+  makeChart("hour", "chart-hour", hourChartCfg(s.by_hour));
+  makeChart("category", "chart-category", categoryChartCfg(s.by_category));
+  makeChart("gravity", "chart-gravity", gravityChartCfg(s.by_gravity));
+  makeChart("status", "chart-status", statusChartCfg(s.by_status));
+}
+function showKpiSkeleton() {
+  if ($("#kpis").children.length) return;
+  $("#kpis").innerHTML = Array.from({length: 4}, () => `
+    <div class="kpi"><div class="skel" style="height:12px;width:70%"></div>
+    <div class="skel" style="height:24px;width:50%;margin-top:8px"></div></div>`).join("");
 }
 function renderKpis(s) {
-  const violent = s.by_class.find((x) => x.class === "Crimes Against Body")?.count ?? 0;
-  const cyber = s.by_class.find((x) => x.class === "Cyber Crimes")?.count ?? 0;
-  const heinous = s.by_gravity.find((g) => g.gravity === "Heinous")?.count ?? 0;
-  const chargesheeted = s.by_status.find((x) => x.status === "ChargeSheeted")?.count ?? 0;
   const total = s.total || 0;
+  const violent = s.by_class.find(x => x.class === "Crimes Against Body")?.count ?? 0;
+  const cyber   = s.by_class.find(x => x.class === "Cyber Crimes")?.count ?? 0;
+  const heinous = s.by_gravity.find(g => g.gravity === "Heinous")?.count ?? 0;
+  const csed    = s.by_status.find(x => x.status === "ChargeSheeted")?.count ?? 0;
   const kpis = [
-    { label: "Total FIRs", value: total.toLocaleString(), sub: "matching filters" },
-    { label: "Heinous", value: heinous.toLocaleString(), sub: total ? `${(heinous/total*100).toFixed(1)}% of cases` : "" },
-    { label: "Chargesheeted", value: chargesheeted.toLocaleString(), sub: total ? `${(chargesheeted/total*100).toFixed(1)}% solved` : "" },
-    { label: "Violent · Cyber", value: `${violent.toLocaleString()} · ${cyber.toLocaleString()}`, sub: "high-priority classes" },
+    { c: "",         label: "Total FIRs", value: fmt(total), sub: "matching filters" },
+    { c: "kpi-danger", label: "Heinous",  value: fmt(heinous), sub: total ? `${pct(heinous, total)} of caseload` : "" },
+    { c: "kpi-ok",     label: "Chargesheeted", value: fmt(csed), sub: total ? `${pct(csed, total)} solved` : "" },
+    { c: "kpi-warn",   label: "Violent · Cyber", value: `${fmt(violent)} · ${fmt(cyber)}`, sub: "high-priority" },
   ];
-  $("#kpis").innerHTML = kpis.map((k) => `
-    <div class="kpi">
-      <div class="label">${k.label}</div>
-      <div class="value">${k.value}</div>
-      <div class="sub">${k.sub}</div>
-    </div>`).join("");
+  $("#kpis").innerHTML = kpis.map(k =>
+    `<div class="kpi ${k.c}"><div class="label">${k.label}</div><div class="value">${k.value}</div><div class="sub">${k.sub}</div></div>`
+  ).join("");
 }
 function chartOpts(extra = {}) {
   return {
     responsive: true, maintainAspectRatio: false,
-    plugins: { legend: { labels: { color: "#e6edf3", font: { size: 11 } } } },
+    interaction: { mode: "index", intersect: false },
+    plugins: {
+      legend: { labels: { color: "#e6edf6", font: { size: 11 }, boxWidth: 12 } },
+      tooltip: { backgroundColor: "#141c26", titleColor: "#e6edf6", bodyColor: "#e6edf6", borderColor: "#253044", borderWidth: 1 },
+    },
     scales: {
-      x: { ticks: { color: "#8b949e" }, grid: { color: "#30363d" } },
-      y: { ticks: { color: "#8b949e" }, grid: { color: "#30363d" } },
-    }, ...extra,
+      x: { ticks: { color: "#94a3b8", font: { size: 10 } }, grid: { color: "rgba(37,48,68,.5)" }, border: { color: "#253044" } },
+      y: { ticks: { color: "#94a3b8", font: { size: 10 } }, grid: { color: "rgba(37,48,68,.5)" }, border: { color: "#253044" }, beginAtZero: true },
+    },
+    ...extra,
   };
 }
-function makeChart(key, ctx, cfg) {
+function makeChart(key, canvasId, cfg) {
   if (state.charts[key]) state.charts[key].destroy();
-  state.charts[key] = new Chart(ctx, cfg);
+  const canvas = $(`#${canvasId}`); if (!canvas) return;
+  state.charts[key] = new Chart(canvas, cfg);
 }
-function renderMonthChart(rows) {
-  makeChart("month", $("#chart-month"), {
+function monthChartCfg(rows) {
+  return {
     type: "line",
-    data: { labels: rows.map(r => r.month), datasets: [{ label: "FIRs", data: rows.map(r => r.count),
-      borderColor: "#f78166", backgroundColor: "rgba(247,129,102,0.2)", fill: true, tension: 0.3 }] },
-    options: chartOpts(),
-  });
+    data: {
+      labels: rows.map(r => r.month),
+      datasets: [{
+        label: "FIRs", data: rows.map(r => r.count),
+        borderColor: "#5aa2ff", backgroundColor: "rgba(90,162,255,.15)",
+        borderWidth: 2, pointRadius: 2, pointHoverRadius: 4, fill: true, tension: 0.32,
+      }],
+    },
+    options: chartOpts({ plugins: { legend: { display: false } } }),
+  };
 }
-function renderClassChart(rows) {
-  makeChart("class", $("#chart-class"), {
+function classDonutCfg(rows) {
+  return {
     type: "doughnut",
-    data: { labels: rows.map(r => r.class), datasets: [{ data: rows.map(r => r.count),
-      backgroundColor: rows.map(r => nodeGroupColor(r.class)) }] },
-    options: { responsive: true, maintainAspectRatio: false,
-      plugins: { legend: { position: "right", labels: { color: "#e6edf3", font: { size: 10 } } } } },
-  });
+    data: {
+      labels: rows.map(r => r.class),
+      datasets: [{ data: rows.map(r => r.count), backgroundColor: rows.map(r => colorFor(r.class)),
+        borderColor: "#141c26", borderWidth: 2 }],
+    },
+    options: { responsive: true, maintainAspectRatio: false, cutout: "62%",
+      plugins: { legend: { position: "right", labels: { color: "#e6edf6", font: { size: 10 }, boxWidth: 12, padding: 8 } } } },
+  };
 }
-function renderHourChart(rows) {
-  const data = new Array(24).fill(0);
-  rows.forEach(r => data[r.hour] = r.count);
-  makeChart("hour", $("#chart-hour"), {
+function hourChartCfg(rows) {
+  const data = new Array(24).fill(0); rows.forEach(r => { data[r.hour] = r.count; });
+  return {
     type: "bar",
     data: { labels: data.map((_, i) => `${String(i).padStart(2, "0")}h`),
-      datasets: [{ data, backgroundColor: "#58a6ff" }] },
+      datasets: [{ data, backgroundColor: "#5aa2ff", borderRadius: 3, maxBarThickness: 20 }] },
     options: chartOpts({ plugins: { legend: { display: false } } }),
-  });
+  };
 }
-function renderCategoryChart(rows) {
+function categoryChartCfg(rows) {
   const top = rows.slice(0, 10);
-  makeChart("category", $("#chart-category"), {
+  return {
     type: "bar",
     data: { labels: top.map(r => r.label),
-      datasets: [{ data: top.map(r => r.count), backgroundColor: top.map(r => nodeGroupColor(r.class)) }] },
+      datasets: [{ data: top.map(r => r.count), backgroundColor: top.map(r => colorFor(r.class)), borderRadius: 3 }] },
     options: chartOpts({ indexAxis: "y", plugins: { legend: { display: false } } }),
-  });
+  };
 }
-function renderGravityChart(rows) {
-  const colors = { "Heinous": "#f85149", "Non-Heinous": "#f0883e", "Petty": "#3fb950" };
-  makeChart("gravity", $("#chart-gravity"), {
+function gravityChartCfg(rows) {
+  const colors = { "Heinous": "#ef4444", "Non-Heinous": "#f59e0b", "Petty": "#22c55e" };
+  return {
     type: "bar",
     data: { labels: rows.map(r => r.gravity),
-      datasets: [{ data: rows.map(r => r.count), backgroundColor: rows.map(r => colors[r.gravity] || "#8b949e") }] },
+      datasets: [{ data: rows.map(r => r.count), backgroundColor: rows.map(r => colors[r.gravity] || "#94a3b8"), borderRadius: 3, maxBarThickness: 40 }] },
     options: chartOpts({ plugins: { legend: { display: false } } }),
-  });
+  };
 }
-function renderStatusChart(rows) {
-  const colors = { "UnderInvestigation": "#f0883e", "ChargeSheeted": "#58a6ff", "Closed": "#3fb950", "Pending Trial": "#a371f7", "PendingBeforeCourt": "#e3b341" };
-  makeChart("status", $("#chart-status"), {
+function statusChartCfg(rows) {
+  const colors = { "UnderInvestigation": "#f59e0b", "ChargeSheeted": "#5aa2ff", "Closed": "#22c55e", "Pending Trial": "#a78bfa", "PendingBeforeCourt": "#22d3ee" };
+  return {
     type: "bar",
     data: { labels: rows.map(r => r.status),
-      datasets: [{ data: rows.map(r => r.count), backgroundColor: rows.map(r => colors[r.status] || "#8b949e") }] },
+      datasets: [{ data: rows.map(r => r.count), backgroundColor: rows.map(r => colors[r.status] || "#94a3b8"), borderRadius: 3, maxBarThickness: 40 }] },
     options: chartOpts({ plugins: { legend: { display: false } } }),
-  });
+  };
 }
 
-// ----------------------------------- maps helper --------------------------------------
-function ensureMap(key) {
-  if (state.maps[key]) return state.maps[key];
-  const containerId = key === "geo" ? "map" : key === "predict" ? "predict-map" : "cb-map";
-  const m = L.map(containerId, { zoomControl: true }).setView([14.5, 76.0], 7);
+// -------------------- GEO -------------------------------------------------
+function ensureMap(key, containerId, view = [14.5, 76.0, 7]) {
+  if (state.maps[key]) { state.maps[key].invalidateSize(); return state.maps[key]; }
+  const m = L.map(containerId, { zoomControl: true, preferCanvas: true }).setView([view[0], view[1]], view[2]);
   L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}{r}.png", {
     attribution: "&copy; OSM &copy; CARTO", subdomains: "abcd", maxZoom: 19,
   }).addTo(m);
-  state.maps[key] = m;
-  state.mapLayers[key] = {};
+  state.maps[key] = m; state.mapLayers[key] = {};
+  setTimeout(() => m.invalidateSize(), 30);
   return m;
 }
 function clearMapLayers(key) {
-  const m = state.maps[key];
-  if (!m) return;
-  Object.values(state.mapLayers[key] || {}).forEach((l) => m.removeLayer(l));
+  const m = state.maps[key]; if (!m) return;
+  Object.values(state.mapLayers[key] || {}).forEach(l => m.removeLayer(l));
   state.mapLayers[key] = {};
 }
-
-// ----------------------------------- geospatial --------------------------------------
-async function loadGeo() {
-  ensureMap("geo");
-  clearMapLayers("geo");
-  if (state.currentLayer === "heatmap") await drawHeatmap();
-  if (state.currentLayer === "points")   await drawPoints();
-  if (state.currentLayer === "districts") await drawDistricts();
+async function loadGeoTab() {
+  ensureMap("geo", "map");
+  await drawGeoLayer();
   await drawDistrictList();
 }
+async function drawGeoLayer() {
+  if (!state.maps.geo) return;
+  clearMapLayers("geo");
+  if (state.currentGeoLayer === "heatmap")   await drawHeatmap();
+  if (state.currentGeoLayer === "points")    await drawPoints();
+  if (state.currentGeoLayer === "districts") await drawDistrictBubbles();
+}
 async function drawHeatmap() {
-  const h = await api(`/geo/heatmap${currentFilterQS({ cell_km: 2 })}`);
+  const h = await api(`/geo/heatmap${currentFilterQS({ cell_km: 2 })}`, { _key: "geo-heatmap" });
   if (!h.cells.length) return;
   const pts = h.cells.map(c => [c.lat, c.lng, c.intensity]);
   state.mapLayers.geo.heat = L.heatLayer(pts, {
-    radius: 22, blur: 20, maxZoom: 10, minOpacity: 0.35,
-    gradient: { 0.2: "#58a6ff", 0.5: "#f0883e", 0.8: "#f85149", 1.0: "#ffffff" },
+    radius: 22, blur: 20, maxZoom: 10, minOpacity: 0.30,
+    gradient: { 0.2: "#5aa2ff", 0.5: "#a78bfa", 0.8: "#f59e0b", 1.0: "#ef4444" },
   }).addTo(state.maps.geo);
 }
 async function drawPoints() {
-  const p = await api(`/geo/points${currentFilterQS({ limit: 3000 })}`);
+  const p = await api(`/geo/points${currentFilterQS({ limit: 2500 })}`, { _key: "geo-points" });
   const layer = L.layerGroup();
   p.points.forEach(pt => {
-    const color = nodeGroupColor(pt.class);
-    const m = L.circleMarker([pt.lat, pt.lng], {
-      radius: 4, color, weight: 1, fillOpacity: 0.7, fillColor: color,
+    const color = colorFor(pt.class);
+    layer.addLayer(L.circleMarker([pt.lat, pt.lng], {
+      radius: 3.5, color, weight: 1, fillOpacity: 0.7, fillColor: color,
     }).bindPopup(
-      `<b>${pt.fir_number}</b><br>${pt.category} · ${pt.class}<br>${pt.occurred_at.replace("T", " ")}<br>MO: ${pt.mo || "—"} · Status: ${pt.status || "—"}<br>Gravity: ${pt.gravity || "—"}`
-    );
-    layer.addLayer(m);
+      `<div style="font-weight:600">${pt.fir_number}</div>` +
+      `<div>${pt.category} · <span style="color:${color}">${pt.class}</span></div>` +
+      `<div style="color:#94a3b8">${pt.occurred_at.replace("T", " ").slice(0,16)}</div>` +
+      `<div>MO: ${pt.mo || "—"} · Status: ${pt.status || "—"} · Gravity: ${pt.gravity || "—"}</div>`
+    ));
   });
   state.mapLayers.geo.points = layer.addTo(state.maps.geo);
 }
-async function drawDistricts() {
-  const d = await api(`/geo/district-summary${currentFilterQS()}`);
+async function drawDistrictBubbles() {
+  const d = await api(`/geo/district-summary${currentFilterQS()}`, { _key: "geo-districts-map" });
   const layer = L.layerGroup();
   const maxRate = Math.max(1, ...d.districts.map(r => r.per_lakh || 0));
   d.districts.forEach(r => {
@@ -303,399 +394,418 @@ async function drawDistricts() {
     const rate = r.per_lakh || 0;
     const t = rate / maxRate;
     const radius = 8 + t * 26;
-    const color = t > 0.7 ? "#f85149" : t > 0.4 ? "#f0883e" : "#58a6ff";
+    const color = t > 0.7 ? "#ef4444" : t > 0.4 ? "#f59e0b" : "#5aa2ff";
     layer.addLayer(L.circleMarker([r.hq_lat, r.hq_lng], {
       radius, color, weight: 1, fillOpacity: 0.55, fillColor: color,
-    }).bindPopup(`<b>${r.name}</b> (${r.zone || ""})<br>${r.count.toLocaleString()} FIRs<br>${rate.toFixed(1)} per lakh`));
+    }).bindPopup(
+      `<div style="font-weight:600">${r.name}</div>` +
+      `<div style="color:#94a3b8">${r.zone || ""} zone</div>` +
+      `<div>${r.count.toLocaleString()} FIRs · ${rate.toFixed(1)}/lakh</div>`
+    ));
   });
   state.mapLayers.geo.districts = layer.addTo(state.maps.geo);
 }
 async function drawDistrictList() {
-  const d = await api(`/geo/district-summary${currentFilterQS()}`);
+  const d = await api(`/geo/district-summary${currentFilterQS()}`, { _key: "geo-district-list" });
+  const list = $("#district-list");
+  if (!d.districts.length) { list.innerHTML = `<div class="empty-state">No districts match.</div>`; return; }
   const max = Math.max(1, ...d.districts.map(r => r.count));
-  $("#district-list").innerHTML = d.districts.map(r => `
+  list.innerHTML = d.districts.map(r => `
     <div class="district-row" data-district="${r.id}">
       <div class="name">${r.name}</div>
-      <div class="count">${r.count.toLocaleString()}</div>
+      <div class="count">${fmt(r.count)}</div>
       <div class="rate">${(r.per_lakh || 0).toFixed(1)}/lakh</div>
       <div class="bar"><div class="bar-fill" style="width:${r.count / max * 100}%"></div></div>
     </div>`).join("");
   $$("#district-list .district-row").forEach(row => {
     row.addEventListener("click", () => {
       $("#f-district").value = row.dataset.district;
-      readFilters(); refreshOverviewAndGeo();
+      readFilters(); refreshCurrentTab(true);
     });
   });
 }
-function wireMapControls() {
-  $$("input[name=layer]").forEach(r => {
-    r.addEventListener("change", async () => { state.currentLayer = r.value; loadGeo(); });
-  });
-}
 
-// ----------------------------------- predict --------------------------------------
-function wirePredictControls() {
-  $("#predict-refresh").addEventListener("click", loadPredictMap);
-  $("#predict-horizon").addEventListener("change", loadPredictMap);
-  $("#predict-head").addEventListener("change", loadPredictMap);
-  $("#fcst-run").addEventListener("click", loadForecastChart);
+// -------------------- PREDICT --------------------------------------------
+async function loadPredictTab() {
+  ensureMap("predict", "predict-map");
+  await loadPredictMap();
 }
 async function loadPredictMap() {
-  ensureMap("predict");
+  if (!state.maps.predict) return;
   clearMapLayers("predict");
   const head = $("#predict-head").value;
   const horizon = $("#predict-horizon").value;
-  const q = qs({ horizon, ...(head ? { head } : {}) });
-  const r = await api(`/predict/density-map${q}`);
+  let r;
+  try { r = await api(`/predict/density-map${qs({ horizon, ...(head ? { head } : {}) })}`, { _key: "predict-map" }); }
+  catch { return; }
   if (!r.cells.length) return;
   const pts = r.cells.map(c => [c.lat, c.lng, c.intensity]);
   state.mapLayers.predict.heat = L.heatLayer(pts, {
     radius: 24, blur: 22, maxZoom: 10, minOpacity: 0.30,
-    gradient: { 0.2: "#58a6ff", 0.5: "#a371f7", 0.8: "#f0883e", 1.0: "#f85149" },
+    gradient: { 0.2: "#5aa2ff", 0.5: "#a78bfa", 0.8: "#f59e0b", 1.0: "#ef4444" },
   }).addTo(state.maps.predict);
-  // Top 10 predicted-hotspot markers with popups.
-  const top = [...r.cells].sort((a, b) => b.predicted_next - a.predicted_next).slice(0, 10);
+
+  const top = [...r.cells].sort((a, b) => b.predicted_next - a.predicted_next).slice(0, 12);
   const markers = L.layerGroup();
   top.forEach(c => {
     markers.addLayer(L.circleMarker([c.lat, c.lng], {
-      radius: 8, color: "#f85149", weight: 2, fillOpacity: 0.4, fillColor: "#f85149",
+      radius: 7, color: "#ef4444", weight: 2, fillOpacity: 0.45, fillColor: "#ef4444",
     }).bindPopup(
-      `<b>Unit ${c.unit_id}</b><br>Predicted next ${r.horizon_weeks}w: <b>${c.predicted_next}</b><br>Recent ${r.horizon_weeks}w: ${c.recent_actual}<br>Δ ${c.delta_pct == null ? "—" : c.delta_pct + "%"}`
+      `<div style="font-weight:600">Unit ${c.unit_id}</div>` +
+      `<div>Predicted next ${r.horizon_weeks}w: <b>${c.predicted_next}</b></div>` +
+      `<div>Recent ${r.horizon_weeks}w: ${c.recent_actual}</div>` +
+      `<div style="color:#94a3b8">Δ ${c.delta_pct == null ? "—" : c.delta_pct + "%"}</div>`
     ));
   });
   state.mapLayers.predict.markers = markers.addTo(state.maps.predict);
 }
 async function loadForecastChart() {
-  const did = $("#fcst-district").value;
-  const hid = $("#fcst-head").value;
-  if (!did || !hid) return;
-  const f = await api(`/predict/district/${did}/head/${hid}?horizon=8`);
-  const histLabels = f.history_weeks;
-  const histVals = f.history_values;
-  const fcstLabels = f.weeks;
-  makeChart("fcst", $("#fcst-chart"), {
+  const did = $("#fcst-district").value, hid = $("#fcst-head").value;
+  if (!did || !hid) { toast("Pick district and head first", "warn"); return; }
+  let f;
+  try { f = await api(`/predict/district/${did}/head/${hid}?horizon=8`, { _key: "forecast" }); } catch { return; }
+  const hL = f.history_weeks, hV = f.history_values, fL = f.weeks;
+  makeChart("fcst", "fcst-chart", {
     type: "line",
     data: {
-      labels: [...histLabels, ...fcstLabels],
+      labels: [...hL, ...fL],
       datasets: [
-        { label: "History", data: [...histVals, ...new Array(fcstLabels.length).fill(null)],
-          borderColor: "#58a6ff", backgroundColor: "rgba(88,166,255,0.15)", tension: 0.2, pointRadius: 0 },
-        { label: "Forecast", data: [...new Array(histLabels.length).fill(null), ...f.point],
-          borderColor: "#f78166", borderDash: [5, 5], tension: 0.2, pointRadius: 0 },
-        { label: "Upper 90%", data: [...new Array(histLabels.length).fill(null), ...f.upper],
-          borderColor: "rgba(247,129,102,0.4)", pointRadius: 0, borderWidth: 1 },
-        { label: "Lower 90%", data: [...new Array(histLabels.length).fill(null), ...f.lower],
-          borderColor: "rgba(247,129,102,0.4)", pointRadius: 0, borderWidth: 1 },
+        { label: "History", data: [...hV, ...new Array(fL.length).fill(null)],
+          borderColor: "#5aa2ff", backgroundColor: "rgba(90,162,255,.12)", tension: 0.25, pointRadius: 0, borderWidth: 2, fill: true },
+        { label: "Forecast", data: [...new Array(hL.length).fill(null), ...f.point],
+          borderColor: "#f59e0b", borderDash: [5,5], tension: 0.25, pointRadius: 0, borderWidth: 2 },
+        { label: "Upper 90%", data: [...new Array(hL.length).fill(null), ...f.upper],
+          borderColor: "rgba(245,158,11,.4)", pointRadius: 0, borderWidth: 1 },
+        { label: "Lower 90%", data: [...new Array(hL.length).fill(null), ...f.lower],
+          borderColor: "rgba(245,158,11,.4)", pointRadius: 0, borderWidth: 1 },
       ]
     },
-    options: chartOpts({ scales: { x: { ticks: { color: "#8b949e", maxTicksLimit: 12 }, grid: { color: "#30363d" } }, y: { ticks: { color: "#8b949e" }, grid: { color: "#30363d" }, beginAtZero: true } } }),
+    options: chartOpts({ scales: { x: { ticks: { color: "#94a3b8", maxTicksLimit: 12, font:{size:10} }, grid: { color: "rgba(37,48,68,.5)" } }, y: { ticks: { color: "#94a3b8", font:{size:10} }, grid: { color: "rgba(37,48,68,.5)" }, beginAtZero: true } } }),
   });
-  $("#fcst-meta").textContent = `method: ${f.method} · history ${histLabels.length} weeks · forecast ${fcstLabels.length} weeks`;
+  $("#fcst-meta").textContent = `method: ${f.method} · history ${hL.length} weeks · forecast ${fL.length} weeks`;
 }
 
-// ----------------------------------- network --------------------------------------
-function wireNetTabs() {
-  $$(".net-tab").forEach(t => {
-    t.addEventListener("click", () => {
-      $$(".net-tab").forEach(x => x.classList.remove("active"));
-      t.classList.add("active");
-      state.currentNetTab = t.dataset.nettab;
-      loadNetTab();
-    });
-  });
-}
-async function loadNetTab() {
+// -------------------- NETWORK --------------------------------------------
+async function loadNetworkList() {
   const tab = state.currentNetTab;
-  if (tab === "offenders")   await loadOffenders();
-  if (tab === "communities") await loadCommunities();
-  if (tab === "central")     await loadCentralFigures();
-  if (tab === "mo")          await loadMoSimilar();
+  const list = $("#offender-list");
+  list.innerHTML = `<div class="list-hint">Loading…</div>`;
+  try {
+    if (tab === "offenders")   await renderOffenders();
+    if (tab === "communities") await renderCommunities();
+    if (tab === "central")     await renderCentralFigures();
+    if (tab === "mo")          await renderMoSimilar();
+  } catch { /* toast surfaced */ }
 }
-async function loadOffenders() {
-  const o = await api("/offenders/top?limit=25");
-  $("#offender-list").innerHTML = o.offenders.map(p => `
-    <div class="offender-row" data-pid="${p.id}">
-      <div class="name">${p.full_name}</div>
-      <div class="stats">${p.incidents} FIRs · ${p.distinct_categories} sub-heads · ${p.district || "—"}</div>
-    </div>`).join("");
-  $$("#offender-list .offender-row").forEach(row => {
-    row.addEventListener("click", () => {
-      $$("#offender-list .offender-row").forEach(r => r.classList.remove("active"));
-      row.classList.add("active");
-      showOffenderNetwork(row.dataset.pid);
-    });
-  });
-  if (o.offenders.length) {
-    $("#offender-list .offender-row").classList.add("active");
-    await showOffenderNetwork(o.offenders[0].id);
-  }
-}
-async function loadCommunities() {
-  const r = await api("/network/communities?top_n=200");
-  $("#offender-list").innerHTML = `<div class="muted" style="padding:6px 10px">Louvain: ${r.summary.nodes} nodes, ${r.summary.edges} edges, ${r.communities.length} communities</div>` +
-    r.communities.map(co => `
-      <div class="community-row" data-community="${co.community_id}">
-        <div class="head"><span>Community #${co.community_id}</span><span>${co.total_cases} cases</span></div>
-        <div class="members">${co.size} members · <span class="sigs">${co.signature_crimes.join(" · ")}</span></div>
+async function renderOffenders() {
+  const o = await api("/offenders/top?limit=40", { _key: "offenders" });
+  const list = $("#offender-list");
+  if (!o.offenders.length) { list.innerHTML = `<div class="empty-state">No repeat offenders yet.</div>`; return; }
+  list.innerHTML =
+    `<div class="list-hint">${o.offenders.length} repeat offenders — click to view network</div>` +
+    o.offenders.map(p => `
+      <div class="offender-row" data-pid="${p.id}">
+        <div class="name">${escapeHtml(p.full_name)}</div>
+        <div class="stats">${p.incidents} FIRs · ${p.distinct_categories} sub-heads · ${escapeHtml(p.district || "—")}</div>
       </div>`).join("");
-  $$("#offender-list .community-row").forEach(row => {
-    row.addEventListener("click", () => showCommunityGraph(r, +row.dataset.community));
-  });
-  if (r.communities.length) showCommunityGraph(r, r.communities[0].community_id);
+  bindNetworkRows("[data-pid]", (row) => showOffenderNetwork(row.dataset.pid));
+  autoActivateFirstRow(o.offenders.length && o.offenders[0].id);
 }
-async function loadCentralFigures() {
-  const r = await api("/network/central-figures?limit=25");
-  $("#offender-list").innerHTML = r.figures.map(f => `
-    <div class="offender-row" data-pid="${f.person_link_id}">
-      <div class="name">${f.name}</div>
-      <div class="stats">score ${f.score} · ${f.cases} cases · wdeg ${f.weighted_degree}<br>
-        <span class="sigs">${f.signature.join(" · ")}</span></div>
-    </div>`).join("");
-  $$("#offender-list .offender-row").forEach(row => {
+async function renderCommunities() {
+  const r = await api("/network/communities?top_n=200", { _key: "communities" });
+  const list = $("#offender-list");
+  if (!r.communities.length) { list.innerHTML = `<div class="empty-state">No communities detected.</div>`; return; }
+  list.innerHTML =
+    `<div class="list-hint">Louvain communities · ${r.summary.nodes} nodes / ${r.summary.edges} edges · ${r.communities.length} clusters</div>` +
+    r.communities.map(co => `
+      <div class="community-row" data-comm="${co.community_id}">
+        <div class="head"><span>Community #${co.community_id}</span><span>${co.total_cases} cases</span></div>
+        <div class="members">${co.size} members</div>
+        <div class="sigs">${co.signature_crimes.map(escapeHtml).join(" · ")}</div>
+      </div>`).join("");
+  bindNetworkRows(".community-row", (row) => showCommunityGraph(r, +row.dataset.comm));
+  const first = $$(".community-row")[0];
+  if (first) { first.classList.add("active"); showCommunityGraph(r, r.communities[0].community_id); }
+}
+async function renderCentralFigures() {
+  const r = await api("/network/central-figures?limit=30", { _key: "central" });
+  const list = $("#offender-list");
+  if (!r.figures.length) { list.innerHTML = `<div class="empty-state">No central figures yet.</div>`; return; }
+  list.innerHTML =
+    `<div class="list-hint">Ranked by centrality × case count</div>` +
+    r.figures.map(f => `
+      <div class="offender-row" data-pid="${f.person_link_id}">
+        <div class="name">${escapeHtml(f.name)} <span class="hint">· score ${f.score}</span></div>
+        <div class="stats">${f.cases} cases · weighted degree ${f.weighted_degree}</div>
+        <div class="sigs">${f.signature.map(escapeHtml).join(" · ")}</div>
+      </div>`).join("");
+  bindNetworkRows("[data-pid]", (row) => showOffenderNetwork(row.dataset.pid));
+  autoActivateFirstRow(r.figures.length && r.figures[0].person_link_id);
+}
+async function renderMoSimilar() {
+  const r = await api("/network/mo-similarity?top_n=80", { _key: "mo" });
+  const list = $("#offender-list");
+  if (!r.pairs.length) { list.innerHTML = `<div class="empty-state">No MO similarities.</div>`; return; }
+  list.innerHTML =
+    `<div class="list-hint">MO-cosine pairs — case-linkage candidates</div>` +
+    r.pairs.slice(0, 60).map(p => `
+      <div class="offender-row" data-pid="${p.a_id}">
+        <div class="name">${escapeHtml(p.a_name)} <span class="hint">↔</span> ${escapeHtml(p.b_name)}</div>
+        <div class="stats">similarity ${p.similarity} · ${p.a_cases} & ${p.b_cases} cases</div>
+      </div>`).join("");
+  bindNetworkRows("[data-pid]", (row) => showOffenderNetwork(row.dataset.pid));
+}
+function bindNetworkRows(sel, handler) {
+  $$(`#offender-list ${sel}`).forEach(row => {
     row.addEventListener("click", () => {
-      $$("#offender-list .offender-row").forEach(r => r.classList.remove("active"));
+      $$(`#offender-list .offender-row, #offender-list .community-row`).forEach(r => r.classList.remove("active"));
       row.classList.add("active");
-      showOffenderNetwork(row.dataset.pid);
-    });
-  });
-  if (r.figures.length) {
-    $("#offender-list .offender-row").classList.add("active");
-    await showOffenderNetwork(r.figures[0].person_link_id);
-  }
-}
-async function loadMoSimilar() {
-  const r = await api("/network/mo-similarity?top_n=60");
-  $("#offender-list").innerHTML = r.pairs.slice(0, 40).map(p => `
-    <div class="offender-row" data-pair="${p.a_id},${p.b_id}">
-      <div class="name">${p.a_name} ↔ ${p.b_name}</div>
-      <div class="stats">similarity ${p.similarity} · ${p.a_cases} & ${p.b_cases} cases</div>
-    </div>`).join("");
-  $$("#offender-list .offender-row").forEach(row => {
-    row.addEventListener("click", () => {
-      const [a, _b] = row.dataset.pair.split(",");
-      showOffenderNetwork(a);
+      handler(row);
     });
   });
 }
+function autoActivateFirstRow(pid) {
+  const first = $("#offender-list .offender-row"); if (!first) return;
+  first.classList.add("active");
+  if (pid) showOffenderNetwork(pid);
+}
+
 async function showOffenderNetwork(pid) {
-  const g = await api(`/network/offender/${pid}`);
+  let g;
+  try { g = await api(`/network/offender/${pid}`, { _key: "graph" }); } catch { return; }
   const p = g.person;
   $("#graph-title").textContent = `${p.full_name} · id ${p.id}`;
   $("#offender-summary").innerHTML = `
-    <div><strong>${g.summary.total_firs}</strong> FIRs</div>
-    <div><strong>${g.summary.distinct_co_offenders}</strong> co-offenders</div>
-    <div><strong>${g.summary.distinct_victims}</strong> victims</div>`;
+    <span><strong>${g.summary.total_firs}</strong> FIRs</span>
+    <span><strong>${g.summary.distinct_co_offenders}</strong> co-offenders</span>
+    <span><strong>${g.summary.distinct_victims}</strong> victims</span>`;
   const groups = {
-    offender_primary: { color: { background: "#f78166", border: "#f78166" }, font: { color: "#fff" }, size: 30 },
-    offender:         { color: { background: "#f85149", border: "#f85149" }, font: { color: "#fff" } },
-    victim:           { color: { background: "#3fb950", border: "#3fb950" }, font: { color: "#fff" } },
-    property_crimes:  { color: { background: "#58a6ff", border: "#58a6ff" }, font: { color: "#fff" } },
-    crimes_against_body: { color: { background: "#f85149", border: "#f85149" }, font: { color: "#fff" } },
-    crimes_against_women: { color: { background: "#f0883e", border: "#f0883e" }, font: { color: "#fff" } },
-    economic_offences: { color: { background: "#3fb950", border: "#3fb950" }, font: { color: "#fff" } },
-    cyber_crimes:     { color: { background: "#a371f7", border: "#a371f7" }, font: { color: "#fff" } },
-    narcotic_offences:{ color: { background: "#e3b341", border: "#e3b341" }, font: { color: "#fff" } },
-    traffic_offences: { color: { background: "#7ee787", border: "#7ee787" }, font: { color: "#fff" } },
-    other_ipc:        { color: { background: "#8b949e", border: "#8b949e" }, font: { color: "#fff" } },
+    offender_primary: { color: { background: "#5aa2ff", border: "#5aa2ff" }, font: { color: "#fff" }, size: 32 },
+    offender:         { color: { background: "#ef4444", border: "#ef4444" }, font: { color: "#fff" } },
+    victim:           { color: { background: "#22c55e", border: "#22c55e" }, font: { color: "#fff" } },
+    property_crimes:  { color: { background: "#5aa2ff", border: "#5aa2ff" }, font: { color: "#fff" } },
+    crimes_against_body:  { color: { background: "#ef4444", border: "#ef4444" }, font: { color: "#fff" } },
+    crimes_against_women: { color: { background: "#f59e0b", border: "#f59e0b" }, font: { color: "#fff" } },
+    economic_offences:{ color: { background: "#22c55e", border: "#22c55e" }, font: { color: "#fff" } },
+    cyber_crimes:     { color: { background: "#a78bfa", border: "#a78bfa" }, font: { color: "#fff" } },
+    narcotic_offences:{ color: { background: "#eab308", border: "#eab308" }, font: { color: "#fff" } },
+    traffic_offences: { color: { background: "#22d3ee", border: "#22d3ee" }, font: { color: "#fff" } },
+    other_ipc:        { color: { background: "#94a3b8", border: "#94a3b8" }, font: { color: "#fff" } },
   };
-  const container = $("#graph");
-  container.innerHTML = "";
-  if (state.offenderNet) state.offenderNet.destroy();
-  state.offenderNet = new vis.Network(container, {
-    nodes: new vis.DataSet(g.graph.nodes),
-    edges: new vis.DataSet(g.graph.edges),
-  }, {
-    layout: { improvedLayout: true },
-    physics: { stabilization: { iterations: 120 }, barnesHut: { gravitationalConstant: -6000 } },
-    interaction: { hover: true, tooltipDelay: 100 },
-    edges: { color: { color: "#30363d", highlight: "#f78166" }, smooth: { type: "continuous" } },
-    nodes: { font: { color: "#e6edf3", size: 11 }, borderWidth: 1 },
-    groups,
-  });
+  renderVis($("#graph"), g.graph.nodes, g.graph.edges, groups);
 }
 function showCommunityGraph(payload, commId) {
   const co = payload.communities.find(c => c.community_id === commId);
   if (!co) return;
-  $("#graph-title").textContent = `Community #${co.community_id} — ${co.size} members`;
+  $("#graph-title").textContent = `Community #${co.community_id} · ${co.size} members`;
   $("#offender-summary").innerHTML = `
-    <div><strong>${co.total_cases}</strong> total cases</div>
-    <div>signature: <strong>${co.signature_crimes.join(", ")}</strong></div>`;
+    <span><strong>${co.total_cases}</strong> cases</span>
+    <span>signature: <strong>${co.signature_crimes.slice(0,3).map(escapeHtml).join(", ")}</strong></span>`;
   const nodes = co.members.map(m => ({
     id: m.person_link_id, label: m.name,
     title: `${m.name} · ${m.cases} cases · wdeg ${m.weighted_degree}`,
-    value: Math.log(m.cases + 1),
-    group: "offender",
+    value: Math.log(m.cases + 1), group: "offender",
   }));
-  // Star edges from the most-central member to the rest — quick visual.
   const center = co.members[0].person_link_id;
   const edges = co.members.slice(1).map(m => ({ from: center, to: m.person_link_id, dashes: true }));
-  const container = $("#graph");
+  renderVis($("#graph"), nodes, edges, {
+    offender: { color: { background: "#ef4444", border: "#ef4444" }, font: { color: "#fff" } },
+  });
+}
+function renderVis(container, nodes, edges, groups) {
   container.innerHTML = "";
-  if (state.offenderNet) state.offenderNet.destroy();
+  if (state.offenderNet) { try { state.offenderNet.destroy(); } catch {} state.offenderNet = null; }
   state.offenderNet = new vis.Network(container, {
     nodes: new vis.DataSet(nodes), edges: new vis.DataSet(edges),
   }, {
-    physics: { stabilization: { iterations: 100 }, barnesHut: { gravitationalConstant: -5000 } },
-    edges: { color: { color: "#30363d" } },
-    nodes: { font: { color: "#e6edf3", size: 11 }, borderWidth: 1, shape: "dot", scaling: { min: 6, max: 24 } },
-    groups: { offender: { color: { background: "#f85149", border: "#f85149" }, font: { color: "#fff" } } },
+    layout: { improvedLayout: nodes.length < 200 },
+    physics: { stabilization: { iterations: 100 }, barnesHut: { gravitationalConstant: -6500, springLength: 120 } },
+    interaction: { hover: true, tooltipDelay: 100 },
+    edges: { color: { color: "#334155", highlight: "#5aa2ff" }, smooth: { type: "continuous" }, width: 1 },
+    nodes: { font: { color: "#e6edf6", size: 11 }, borderWidth: 1, shape: "dot", scaling: { min: 6, max: 26 } },
+    groups,
   });
 }
 
-// ----------------------------------- cross-border --------------------------------------
-function wireCrossborderTab() { /* nothing extra */ }
+// -------------------- CROSS-BORDER ---------------------------------------
 async function loadCrossborder() {
-  ensureMap("cb");
+  ensureMap("cb", "cb-map", [16.0, 78.0, 6]);
   clearMapLayers("cb");
-  const s = await api("/cross-border/summary");
-  const mv = await api("/cross-border/movements?limit=100");
-  const offs = await api("/cross-border/offenders?limit=15");
+  let s, mv, offs;
+  try {
+    [s, mv, offs] = await Promise.all([
+      api("/cross-border/summary", { _key: "cb-summary" }),
+      api("/cross-border/movements?limit=100", { _key: "cb-movements" }),
+      api("/cross-border/offenders?limit=20", { _key: "cb-offenders" }),
+    ]);
+  } catch { return; }
 
-  // Draw arrest-location markers.
-  const locLayer = L.layerGroup();
+  // Arrest locations
   const max = Math.max(1, ...s.by_district.map(d => d.arrests));
+  const locLayer = L.layerGroup();
   s.by_district.forEach(d => {
     if (!d.lat) return;
-    const r = 6 + 20 * (d.arrests / max);
+    const r = 6 + 22 * (d.arrests / max);
     locLayer.addLayer(L.circleMarker([d.lat, d.lng], {
-      radius: r, color: "#f85149", weight: 1, fillOpacity: 0.5, fillColor: "#f85149",
-    }).bindPopup(`<b>${d.district}, ${d.state}</b><br>${d.arrests} cross-border arrests`));
+      radius: r, color: "#ef4444", weight: 1, fillOpacity: 0.5, fillColor: "#ef4444",
+    }).bindPopup(`<b>${escapeHtml(d.district || "—")}, ${escapeHtml(d.state)}</b><br>${d.arrests} arrests`));
   });
   state.mapLayers.cb.locs = locLayer.addTo(state.maps.cb);
 
-  // Draw home→arrest movement lines.
-  const lineLayer = L.layerGroup();
+  // Home → arrest arcs
   const mvMax = Math.max(1, ...mv.movements.map(m => m.movements));
+  const lineLayer = L.layerGroup();
   mv.movements.forEach(m => {
-    const w = 1 + 4 * (m.movements / mvMax);
+    if (!m.home_lat || !m.arrest_lat) return;
+    const w = 1 + 3.5 * (m.movements / mvMax);
     lineLayer.addLayer(L.polyline([[m.home_lat, m.home_lng], [m.arrest_lat, m.arrest_lng]], {
-      color: "#a371f7", weight: w, opacity: 0.55,
-    }).bindPopup(`<b>${m.home_district} → ${m.arrest_district}</b> (${m.arrest_state || "—"})<br>${m.movements} movements`));
+      color: "#a78bfa", weight: w, opacity: 0.5,
+    }).bindPopup(`<b>${escapeHtml(m.home_district || "—")} → ${escapeHtml(m.arrest_district || "—")}</b><br>${escapeHtml(m.arrest_state || "—")}<br>${m.movements} movements`));
   });
   state.mapLayers.cb.lines = lineLayer.addTo(state.maps.cb);
-  state.maps.cb.setView([16.0, 78.0], 6);
 
-  // Chart: arrests by state.
-  makeChart("cb_state", $("#cb-state"), {
+  // Charts
+  makeChart("cb_state", "cb-state", {
     type: "bar",
     data: { labels: s.by_state.map(x => x.state),
-      datasets: [{ data: s.by_state.map(x => x.arrests), backgroundColor: "#a371f7" }] },
+      datasets: [{ data: s.by_state.map(x => x.arrests), backgroundColor: "#a78bfa", borderRadius: 3 }] },
     options: chartOpts({ plugins: { legend: { display: false } }, indexAxis: "y" }),
   });
-  makeChart("cb_class", $("#cb-class"), {
+  makeChart("cb_class", "cb-class", {
     type: "bar",
     data: { labels: s.by_class.map(x => x.class),
-      datasets: [{ data: s.by_class.map(x => x.arrests), backgroundColor: s.by_class.map(x => nodeGroupColor(x.class)) }] },
+      datasets: [{ data: s.by_class.map(x => x.arrests), backgroundColor: s.by_class.map(x => colorFor(x.class)), borderRadius: 3 }] },
     options: chartOpts({ plugins: { legend: { display: false } }, indexAxis: "y" }),
   });
 
-  $("#cb-offenders").innerHTML = offs.offenders.map(o => `
-    <div class="row">
-      <div class="name">${o.name}</div>
-      <div class="n">${o.total_arrests} arrests</div>
-      <div class="n">${o.distinct_arrest_states} states</div>
-      <div class="states">across: ${o.states}</div>
-    </div>`).join("");
+  // Table
+  const tbody = $("#cb-offenders tbody");
+  tbody.innerHTML = offs.offenders.map(o => `
+    <tr>
+      <td class="strong">${escapeHtml(o.name)}</td>
+      <td class="num">${o.total_arrests}</td>
+      <td class="num">${o.distinct_arrest_states}</td>
+      <td class="mute">${escapeHtml(o.states || "")}</td>
+    </tr>`).join("");
 }
 
-// ----------------------------------- law & order --------------------------------------
+// -------------------- LAW & ORDER ----------------------------------------
 async function loadLawOrder() {
-  const [f, ch, ct, io] = await Promise.all([
-    api("/law-order/status-funnel"),
-    api("/law-order/chargesheet-rate"),
-    api("/law-order/court-pendency"),
-    api("/law-order/io-workload"),
-  ]);
-  makeChart("lo_funnel", $("#lo-funnel"), {
+  let f, ch, ct, io;
+  try {
+    [f, ch, ct, io] = await Promise.all([
+      api("/law-order/status-funnel", { _key: "lo-funnel" }),
+      api("/law-order/chargesheet-rate", { _key: "lo-cs" }),
+      api("/law-order/court-pendency", { _key: "lo-court" }),
+      api("/law-order/io-workload", { _key: "lo-io" }),
+    ]);
+  } catch { return; }
+
+  makeChart("lo_funnel", "lo-funnel", {
     type: "bar",
     data: { labels: f.status.map(x => x.status),
-      datasets: [{ data: f.status.map(x => x.c), backgroundColor: "#58a6ff" }] },
+      datasets: [{ data: f.status.map(x => x.c), backgroundColor: "#5aa2ff", borderRadius: 3 }] },
     options: chartOpts({ plugins: { legend: { display: false } }, indexAxis: "y" }),
   });
-  $("#lo-chargesheet").innerHTML = ch.districts.slice(0, 20).map(r => `
-    <div class="lo-row district">
-      <div class="name">${r.district}</div>
-      <div class="num">${r.total || 0}</div>
-      <div class="num">${r.chargesheeted || 0}</div>
-      <div class="num" style="color:var(--danger)">${r.false_cases || 0}B</div>
-      <div class="num" style="color:var(--warn)">${r.pct != null ? r.pct + "%" : "—"}</div>
-    </div>`).join("");
-  $("#lo-court").innerHTML = ct.courts.slice(0, 15).map(r => `
-    <div class="lo-row court">
-      <div><div class="name">${r.court}</div><div class="sub">${r.district}</div></div>
-      <div class="num">${r.pending || 0}</div>
-      <div class="num">${r.total || 0}</div>
-    </div>`).join("");
-  $("#lo-io").innerHTML = io.officers.slice(0, 15).map(r => `
-    <div class="lo-row io">
-      <div><div class="name">${r.io_name}</div><div class="sub">${r.station || "—"}</div></div>
-      <div class="num">${r.caseload || 0}</div>
-      <div class="num" style="color:var(--warn)">${r.open_cases || 0} open</div>
-    </div>`).join("");
+
+  $("#lo-chargesheet tbody").innerHTML = ch.districts.slice(0, 20).map(r => `
+    <tr>
+      <td class="strong">${escapeHtml(r.district)}</td>
+      <td class="num">${fmt(r.total || 0)}</td>
+      <td class="num">${fmt(r.chargesheeted || 0)}</td>
+      <td class="num" style="color:var(--danger)">${fmt(r.false_cases || 0)}</td>
+      <td class="num pill-cell"><span class="pill ${csClass(r.pct)}">${r.pct != null ? r.pct + "%" : "—"}</span></td>
+    </tr>`).join("");
+  $("#lo-court tbody").innerHTML = ct.courts.slice(0, 15).map(r => `
+    <tr>
+      <td class="strong">${escapeHtml(r.court)}</td>
+      <td class="mute">${escapeHtml(r.district)}</td>
+      <td class="num">${fmt(r.pending || 0)}</td>
+      <td class="num mute">${fmt(r.total || 0)}</td>
+    </tr>`).join("");
+  $("#lo-io tbody").innerHTML = io.officers.slice(0, 15).map(r => `
+    <tr>
+      <td class="strong">${escapeHtml(r.io_name)}</td>
+      <td class="mute">${escapeHtml(r.station || "—")}</td>
+      <td class="num">${fmt(r.caseload || 0)}</td>
+      <td class="num" style="color:var(--warn)">${fmt(r.open_cases || 0)}</td>
+    </tr>`).join("");
 }
+function csClass(p) { if (p == null) return "flat"; if (p >= 60) return "down"; if (p >= 40) return "info"; return "warn"; }
 
-// ----------------------------------- anomalies + trends --------------------------------------
+// -------------------- ANOMALIES & TRENDS ---------------------------------
 async function loadAnomaliesAndTrends() {
-  const [a, t] = await Promise.all([api("/anomalies"), api("/trends/emerging")]);
-  const rows = a.anomalies;
-  $("#anomaly-list").innerHTML = rows.length ? rows.map(r => {
-    const cls = r.z_score >= 3 ? "high" : "med";
-    return `<div class="anomaly-row">
-      <div><div class="place">${r.district}</div><div class="cat">${r.category} · ${r.class}</div></div>
-      <div class="cnt">${r.observed} <span class="muted">obs / ${r.expected} exp</span></div>
-      <div class="z ${cls}">z=${r.z_score}</div></div>`;
-  }).join("") : `<div class="muted">No anomalies for ${a.reference_month || "n/a"}.</div>`;
+  let a, t;
+  try {
+    [a, t] = await Promise.all([api("/anomalies", { _key: "anom" }), api("/trends/emerging", { _key: "trends" })]);
+  } catch { return; }
+  const at = $("#anomaly-list tbody");
+  at.innerHTML = a.anomalies.length ? a.anomalies.map(r => {
+    const zc = r.z_score >= 3 ? "up" : "warn";
+    return `<tr>
+      <td class="strong">${escapeHtml(r.district)}</td>
+      <td>${escapeHtml(r.category)} <span class="hint">· ${escapeHtml(r.class)}</span></td>
+      <td class="num">${r.observed}</td>
+      <td class="num mute">${r.expected}</td>
+      <td class="num pill-cell"><span class="pill ${zc}">z=${r.z_score}</span></td>
+    </tr>`;
+  }).join("") : `<tr><td colspan="5" class="empty-state">No anomalies for ${a.reference_month || "n/a"}.</td></tr>`;
 
-  const trows = t.trends;
-  $("#trends-list").innerHTML = trows.length ? trows.map(r => {
+  const tt = $("#trends-list tbody");
+  tt.innerHTML = t.trends.length ? t.trends.map(r => {
     const g = r.growth_pct;
     const cls = g === null ? "up" : g > 20 ? "up" : g < -20 ? "down" : "flat";
     const label = g === null ? "new" : `${g > 0 ? "+" : ""}${g}%`;
-    return `<div class="trend-row">
-      <div><div class="cat">${r.category}</div><div class="class">${r.class}</div></div>
-      <div class="num">${r.prior}</div>
-      <div class="num">${r.recent}</div>
-      <div class="num growth ${cls}">${label}</div></div>`;
-  }).join("") : `<div class="muted">Not enough data.</div>`;
+    return `<tr>
+      <td class="strong">${escapeHtml(r.category)}</td>
+      <td class="mute">${escapeHtml(r.class)}</td>
+      <td class="num">${r.prior}</td>
+      <td class="num">${r.recent}</td>
+      <td class="num pill-cell"><span class="pill ${cls}">${label}</span></td>
+    </tr>`;
+  }).join("") : `<tr><td colspan="5" class="empty-state">Not enough data.</td></tr>`;
 }
 
-// ----------------------------------- assistant --------------------------------------
-function wireAssistant() {
-  $("#assistant-ask").addEventListener("click", assistantAsk);
-  $("#assistant-q").addEventListener("keydown", (e) => { if (e.key === "Enter") assistantAsk(); });
-  $$(".chip").forEach(c => c.addEventListener("click", () => {
-    $("#assistant-q").value = c.textContent; assistantAsk();
-  }));
-}
+// -------------------- ASSISTANT ------------------------------------------
 async function assistantAsk() {
-  const q = $("#assistant-q").value.trim();
-  if (!q) return;
-  $("#assistant-output").innerHTML = `<div class="muted">Thinking…</div>`;
+  const q = $("#assistant-q").value.trim(); if (!q) return;
+  const out = $("#assistant-output");
+  out.innerHTML = `<div class="hint">Thinking…</div>`;
+  let r;
   try {
-    const r = await api("/assistant/ask", {
+    r = await api("/assistant/ask", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ question: q }),
+      body: JSON.stringify({ question: q }), _key: "assistant",
     });
-    let html = "";
-    html += `<div class="explanation">${r.explanation} <span class="badge-backend">${r.backend}</span></div>`;
-    html += `<pre>${escapeHtml(r.sql)}</pre>`;
-    if (r.error) {
-      html += `<div class="error">${escapeHtml(r.error)}</div>`;
-    } else if (r.rows.length === 0) {
-      html += `<div class="muted">Query returned no rows.</div>`;
-    } else {
-      html += `<table><thead><tr>${r.columns.map(c => `<th>${c}</th>`).join("")}</tr></thead><tbody>`;
-      html += r.rows.slice(0, 200).map(row => `<tr>${row.map(v => `<td>${escapeHtml(String(v ?? "—"))}</td>`).join("")}</tr>`).join("");
-      html += `</tbody></table>`;
-      html += `<div class="muted" style="margin-top:6px">${r.row_count} row(s)</div>`;
-    }
-    $("#assistant-output").innerHTML = html;
-  } catch (e) {
-    $("#assistant-output").innerHTML = `<div class="error">${escapeHtml(String(e))}</div>`;
+  } catch { return; }
+  const backendCls = r.backend === "offline" ? "offline" : "online";
+  let html = `
+    <div class="assistant-meta">
+      <span class="badge-backend ${backendCls}">${escapeHtml(r.backend)}</span>
+      <span class="explanation">${escapeHtml(r.explanation || "")}</span>
+    </div>
+    <pre>${escapeHtml(r.sql)}</pre>`;
+  if (r.error) {
+    html += `<div class="error">${escapeHtml(r.error)}</div>`;
+  } else if (r.rows.length === 0) {
+    html += `<div class="hint">Query returned no rows.</div>`;
+  } else {
+    html += `<div style="max-height:420px; overflow:auto"><table class="data-table">
+      <thead><tr>${r.columns.map(c => `<th>${escapeHtml(c)}</th>`).join("")}</tr></thead>
+      <tbody>${r.rows.slice(0, 200).map(row =>
+        `<tr>${row.map(v => `<td>${escapeHtml(String(v ?? "—"))}</td>`).join("")}</tr>`).join("")}</tbody>
+      </table></div>
+      <div class="row-count">${r.row_count} row(s)</div>`;
   }
+  out.innerHTML = html;
+  $("#assistant-backend").textContent = `backend: ${r.backend}`;
 }
+
+// -------------------- utils ----------------------------------------------
+function fmt(n)  { return Number(n).toLocaleString(); }
+function pct(a,b){ return b ? (a / b * 100).toFixed(1) + "%" : "—"; }
 function escapeHtml(s) {
-  return s.replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" }[c]));
+  return String(s).replace(/[&<>"']/g, c => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[c]));
 }
 
 document.addEventListener("DOMContentLoaded", bootstrap);

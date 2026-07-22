@@ -43,3 +43,4 @@ app-server/h11*
 app-server/idna*
 app-server/typing_extensions*
 app-server/bin/
+.env.deploy
