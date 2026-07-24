@@ -538,6 +538,7 @@ async function loadNetworkList() {
     if (tab === "communities") await renderCommunities();
     if (tab === "central")     await renderCentralFigures();
     if (tab === "mo")          await renderMoSimilar();
+    if (tab === "victims")     await renderVictimLinks();
   } catch { /* toast surfaced */ }
 }
 async function renderOffenders() {
@@ -598,6 +599,38 @@ async function renderMoSimilar() {
       </div>`).join("");
   bindNetworkRows("[data-pid]", (row) => showOffenderNetwork(row.dataset.pid));
 }
+async function renderVictimLinks() {
+  const r = await api("/network/victim-links?min_case_count=2", { _key: "victims" });
+  const list = $("#offender-list");
+  const profileEl = $("#offender-profile");
+  if (profileEl) profileEl.innerHTML = "";
+  $("#graph-title").textContent = "Repeat victimization";
+  $("#offender-summary").innerHTML = `
+    <span><strong>${r.summary.repeat_victim_names}</strong> repeat victims</span>
+    <span><strong>${r.summary.repeat_offender_victim_pairs}</strong> repeat offender↔victim pairs</span>`;
+  if (!r.repeat_pairs.length && !r.repeat_victims.length) {
+    list.innerHTML = `<div class="empty-state">No repeat victimization detected in this dataset.</div>`;
+    renderVis($("#graph"), [], [], {});
+    return;
+  }
+  const pairRows = r.repeat_pairs.map(p => `
+    <div class="offender-row" data-pid="${p.offender_person_link_id}">
+      <div class="name">⚠ ${escapeHtml(p.victim_name)} <span class="hint">targeted by</span> ${escapeHtml(p.offender_name)}</div>
+      <div class="stats">${p.shared_cases} separate FIRs — same offender, same victim</div>
+    </div>`).join("");
+  const hubRows = r.hub_victims.slice(0, 20).map(v => `
+    <div class="offender-row" data-victim-only="1">
+      <div class="name">${escapeHtml(v.victim_name)} <span class="hint">· possible hub</span></div>
+      <div class="stats">${v.case_count} FIRs · ${v.distinct_offenders} distinct offenders — review for name-collision vs. real pattern</div>
+    </div>`).join("");
+  list.innerHTML =
+    `<div class="list-hint">${r.caveat}</div>` +
+    (pairRows ? `<div class="list-hint">Repeat targeting by the same offender</div>${pairRows}` : "") +
+    (hubRows ? `<div class="list-hint">Victims linked to many distinct offenders</div>${hubRows}` : "");
+  bindNetworkRows("[data-pid]", (row) => showOffenderNetwork(row.dataset.pid));
+  const first = $$("#offender-list [data-pid]")[0];
+  if (first) { first.classList.add("active"); showOffenderNetwork(first.dataset.pid); }
+}
 function bindNetworkRows(sel, handler) {
   $$(`#offender-list ${sel}`).forEach(row => {
     row.addEventListener("click", () => {
@@ -622,6 +655,7 @@ async function showOffenderNetwork(pid) {
     <span><strong>${g.summary.total_firs}</strong> FIRs</span>
     <span><strong>${g.summary.distinct_co_offenders}</strong> co-offenders</span>
     <span><strong>${g.summary.distinct_victims}</strong> victims</span>`;
+  renderOffenderProfile(pid);
   const groups = {
     offender_primary: { color: { background: "#5aa2ff", border: "#5aa2ff" }, font: { color: "#fff" }, size: 32 },
     offender:         { color: { background: "#ef4444", border: "#ef4444" }, font: { color: "#fff" } },
@@ -640,6 +674,8 @@ async function showOffenderNetwork(pid) {
 function showCommunityGraph(payload, commId) {
   const co = payload.communities.find(c => c.community_id === commId);
   if (!co) return;
+  const profileEl = $("#offender-profile");
+  if (profileEl) profileEl.innerHTML = `<div class="empty-state">Select a single offender to view their behavioral profile.</div>`;
   $("#graph-title").textContent = `Community #${co.community_id} · ${co.size} members`;
   $("#offender-summary").innerHTML = `
     <span><strong>${co.total_cases}</strong> cases</span>
@@ -668,6 +704,58 @@ function renderVis(container, nodes, edges, groups) {
     nodes: { font: { color: "#e6edf6", size: 11 }, borderWidth: 1, shape: "dot", scaling: { min: 6, max: 26 } },
     groups,
   });
+}
+
+// -------------------- BEHAVIORAL / CRIMINOLOGICAL PROFILE -----------------
+const RISK_TIER_COLOR = { critical: "#ef4444", high: "#f59e0b", medium: "#eab308", low: "#22c55e" };
+
+async function renderOffenderProfile(pid) {
+  const el = $("#offender-profile");
+  if (!el) return; // edge case: markup not present on this build
+  el.innerHTML = `<div class="empty-state">Loading behavioral profile…</div>`;
+  let r;
+  try {
+    r = await api(`/network/offender/${pid}/profile`, { _key: "profile" });
+  } catch {
+    // Edge case: person has no linkable FIRs, or this is a community/MO-pair
+    // row where pid isn't a plain offender id — fail quietly rather than
+    // showing a scary error for a non-fatal gap.
+    el.innerHTML = `<div class="empty-state">No behavioral profile available for this entity.</div>`;
+    return;
+  }
+  const risk = r.risk, color = RISK_TIER_COLOR[risk.tier] || "#94a3b8";
+  const bars = Object.entries(risk.components).map(([k, v]) => `
+    <div class="risk-bar-row">
+      <span class="risk-bar-label">${escapeHtml(k.replace(/_/g, " "))}</span>
+      <div class="risk-bar-track"><div class="risk-bar-fill" style="width:${Math.round(v * 100)}%"></div></div>
+    </div>`).join("");
+  const topCrimes = r.mo_signature.top_crime_types.map(t => `${escapeHtml(t.type)} (${t.count})`).join(" · ") || "—";
+  const weapons = r.mo_signature.weapon_pattern.map(w => `${escapeHtml(w.weapon)} (${w.count})`).join(" · ") || "none recorded";
+  const districts = r.spatial_pattern.district_breakdown.slice(0, 4).map(d => `${escapeHtml(d.district)} (${d.count})`).join(" · ") || "—";
+
+  el.innerHTML = `
+    <div class="profile-panel">
+      <div class="profile-head">
+        <span class="risk-pill" style="background:${color}22;color:${color};border-color:${color}55">
+          ${risk.tier.toUpperCase()} RISK · ${risk.score}/100
+        </span>
+        <span class="hint">${escapeHtml(r.escalation.trend)} pattern · ${r.total_cases} FIR(s)</span>
+      </div>
+      <div class="profile-grid">
+        <div><div class="k">Peak activity</div><div class="v">
+          ${r.temporal_pattern.peak_hour ?? "—"}:00 hrs${r.temporal_pattern.night_offense_pct != null ? ` · ${r.temporal_pattern.night_offense_pct}% at night` : ""}
+        </div></div>
+        <div><div class="k">Districts active in</div><div class="v">${districts}</div></div>
+        <div><div class="k">Signature crime types</div><div class="v">${topCrimes}</div></div>
+        <div><div class="k">Weapon pattern</div><div class="v">${weapons}</div></div>
+        <div><div class="k">Co-offender network</div><div class="v">${r.network.distinct_co_offenders} linked offenders · weighted degree ${r.network.weighted_co_offense_degree}</div></div>
+        <div><div class="k">Case outcomes</div><div class="v">
+          ${r.outcomes.chargesheet_rate != null ? `${Math.round(r.outcomes.chargesheet_rate * 100)}% chargesheeted` : "pending disposal"}
+        </div></div>
+      </div>
+      <div class="risk-bars">${bars}</div>
+      <div class="hint profile-note">${escapeHtml(risk.note)}</div>
+    </div>`;
 }
 
 // -------------------- CROSS-BORDER ---------------------------------------

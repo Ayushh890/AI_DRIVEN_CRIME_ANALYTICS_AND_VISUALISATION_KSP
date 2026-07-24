@@ -23,6 +23,8 @@ loading the same tables from the CCTNS export — no changes to the API or UI.
 | Relationship mapping (suspect/victim/location)          | Network tab · vis-network graph                           |
 | Repeat-offender tracking                                | Network → Repeat offenders                                |
 | **Deep criminological network analysis**                | **Network → Communities (Louvain), Central figures, MO similarity** |
+| **Behavioral & criminological offender profiling**       | **Network → offender detail panel · `/network/offender/{pid}/profile` — escalation trend, temporal/spatial signature, weapon pattern, explainable risk score** |
+| **Repeat-victimization / victim-offender linkage**       | **Network → Victims tab · `/network/victim-links` — repeat victims, same-offender-same-victim pairs, hub-victim flags** |
 | **Cross-border crimes**                                 | **Cross-border tab · arrest map, home→arrest lines, offenders** |
 | **Law & order system information**                      | **Law & Order tab · court pendency, IO workload, chargesheet rate, gravity mix** |
 | Socio-economic overlays                                 | `/geo/district-summary` — per-lakh rate uses census        |
@@ -95,7 +97,7 @@ Full OpenAPI at `/docs`. Grouped:
 
 **Geospatial** — `/geo/heatmap`, `/geo/points`, `/geo/district-summary`
 **Prediction** — `/predict/density-map`, `/predict/unit/{id}/head/{id}`, `/predict/district/{id}/head/{id}`
-**Network** — `/offenders/top`, `/network/offender/{pid}`, `/network/communities`, `/network/central-figures`, `/network/mo-similarity`
+**Network** — `/offenders/top`, `/network/offender/{pid}`, `/network/offender/{pid}/profile`, `/network/communities`, `/network/central-figures`, `/network/mo-similarity`, `/network/victim-links`
 **Cross-border** — `/cross-border/summary`, `/cross-border/movements`, `/cross-border/offenders`
 **Law & Order** — `/law-order/court-pendency`, `/law-order/io-workload`, `/law-order/chargesheet-rate`, `/law-order/gravity-mix`, `/law-order/status-funnel`
 **Trends / anomalies** — `/anomalies`, `/trends/emerging`

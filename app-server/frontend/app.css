@@ -773,3 +773,23 @@ input:focus, select:focus { outline: none; border-color: var(--accent); box-shad
 }
 
 .hidden { display: none !important; }
+
+/* ---------- Behavioral / criminological offender profile panel ---------- */
+.profile-panel { display: flex; flex-direction: column; gap: 10px; font-size: 12.5px; }
+.profile-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.risk-pill {
+  display: inline-block; padding: 3px 10px; border-radius: 999px;
+  border: 1px solid; font-weight: 700; font-size: 11px; letter-spacing: .02em;
+}
+.profile-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 8px 16px; padding: 8px 0; border-top: 1px solid var(--border-2); border-bottom: 1px solid var(--border-2);
+}
+.profile-grid .k { color: var(--text-dim); font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em; margin-bottom: 2px; }
+.profile-grid .v { color: var(--text); font-size: 12px; line-height: 1.4; }
+.risk-bars { display: flex; flex-direction: column; gap: 5px; }
+.risk-bar-row { display: grid; grid-template-columns: 150px 1fr; align-items: center; gap: 8px; }
+.risk-bar-label { color: var(--text-mute); font-size: 11px; text-transform: capitalize; }
+.risk-bar-track { height: 6px; border-radius: 4px; background: var(--panel-2); overflow: hidden; }
+.risk-bar-fill { height: 100%; background: linear-gradient(90deg, var(--accent-2), var(--accent)); border-radius: 4px; }
+.profile-note { font-style: italic; }

@@ -20,9 +20,11 @@ Endpoints (grouped):
   Deep criminal network
     GET  /offenders/top
     GET  /network/offender/{pid}
+    GET  /network/offender/{pid}/profile   # behavioral/criminological profile + risk score
     GET  /network/communities
     GET  /network/central-figures
     GET  /network/mo-similarity
+    GET  /network/victim-links                # repeat-victimization + victim-offender pattern mapping
 
   Cross-border crimes
     GET  /cross-border/summary
@@ -474,12 +476,20 @@ def network_offender(pid: int, depth: int = Query(2, ge=1, le=3)):
             ):
                 co_offenders[r["id"]] = dict(r)
             for r in c.execute(
-                f"""SELECT v.VictimName AS name, COUNT(*) AS incidents
-                    FROM Victim v WHERE v.CaseMasterID IN ({placeholder})
-                    GROUP BY v.VictimName ORDER BY incidents DESC LIMIT 40""",
+                f"""SELECT v.VictimName AS name, v.GenderID AS gender, v.AgeYear AS age
+                    FROM Victim v WHERE v.CaseMasterID IN ({placeholder})""",
                 case_ids,
             ):
-                victims[r["name"]] = dict(r)
+                # Same victim-identity convention as network_analysis.victim_network
+                # (name + gender + 5-year age band) so both views of the graph agree.
+                key = network_analysis._victim_identity_key(r["name"], r["gender"], r["age"])
+                if key is None:
+                    continue  # edge case: blank victim name, can't link safely
+                cur = victims.get(key)
+                if cur:
+                    cur["incidents"] += 1
+                else:
+                    victims[key] = {"name": r["name"], "incidents": 1}
 
     nodes = [{
         "id": f"p{pid}", "label": person_row["full_name"],
@@ -504,12 +514,13 @@ def network_offender(pid: int, depth: int = Query(2, ge=1, le=3)):
             "group": "offender",
         })
         edges.append({"from": f"p{pid}", "to": nid, "label": f"co-accused × {r['shared_firs']}", "dashes": True})
-    for vname, r in victims.items():
-        nid = f"v{hash(vname) & 0xFFFFFFFF}"
+    for vkey, r in sorted(victims.items(), key=lambda kv: -kv[1]["incidents"])[:40]:
+        nid = network_analysis.stable_node_id("v", vkey)
+        is_repeat = r["incidents"] >= 2
         nodes.append({
-            "id": nid, "label": vname,
-            "title": f"victim in {r['incidents']} FIR(s)",
-            "group": "victim", "shape": "triangle",
+            "id": nid, "label": r["name"],
+            "title": f"{'⚠ repeat victim — ' if is_repeat else ''}victim in {r['incidents']} FIR(s) with this offender",
+            "group": "victim_repeat" if is_repeat else "victim", "shape": "triangle",
         })
     return {
         "person": {**dict(person_row), "id": pid},
@@ -538,6 +549,38 @@ def network_central_figures(limit: int = 25):
 def network_mo_similarity(top_n: int = 50):
     with db() as c:
         return network_analysis.mo_similarity(c, str(DB_PATH), top_n=top_n)
+
+
+@app.get("/network/offender/{pid}/profile")
+def network_offender_profile(pid: int):
+    """
+    Behavioral / criminological profile for one offender: escalation trend,
+    temporal & spatial pattern, MO/weapon signature, network embeddedness,
+    and an explainable composite risk score. Answers the RFP's "behavioral
+    and criminological profiling" requirement — distinct from MO-similarity,
+    which links pairs of offenders for case-linkage rather than describing
+    one offender's pattern.
+    """
+    with db() as c:
+        profile = network_analysis.offender_profile(c, str(DB_PATH), pid)
+    if profile is None:
+        # Edge case: id well-formed but no linkable FIRs for this person —
+        # 404, not 500, so the UI can show "no record" instead of crashing.
+        raise HTTPException(404, "no linkable record for this person_link_id")
+    return profile
+
+
+@app.get("/network/victim-links")
+def network_victim_links(min_case_count: int = Query(2, ge=2, le=20)):
+    """
+    Repeat-victimization + victim-offender relationship mapping. Closes the
+    RFP's "discover hidden relationships between crimes, offenders, victims,
+    locations" requirement on the victim side — surfaces victims targeted
+    more than once, and specifically by the same offender more than once
+    (the strongest stalking/DV/extortion-pattern signal in the data).
+    """
+    with db() as c:
+        return network_analysis.victim_network(c, str(DB_PATH), min_case_count=min_case_count)
 
 
 # ---------- cross-border -------------------------------------------------------------
