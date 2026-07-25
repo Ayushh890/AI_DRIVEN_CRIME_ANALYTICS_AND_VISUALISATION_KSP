@@ -78,7 +78,7 @@ esac
 command -v catalyst >/dev/null || { echo "❌ catalyst CLI missing. add ~/.npm-global/bin to PATH."; exit 2; }
 ./build-catalyst.sh --deploy
 
-URL="https://ksp-cip-server-50044254710.development.catalystappsail.in"
+URL="https://ksp-cip-server-50044312720.development.catalystappsail.in"
 echo
 echo "▶ verifying $URL/assistant/health"
 sleep 6

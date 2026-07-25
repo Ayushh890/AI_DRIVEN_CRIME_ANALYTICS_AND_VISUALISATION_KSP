@@ -10,17 +10,17 @@
   "projects": [
     {
       "idx": 1,
-      "id": "43371000000022006",
-      "name": "AI-driven-crime-analytics-and-visualization",
+      "id": "43514000000013049",
+      "name": "ai-crime-analytics-ksp",
       "domain": {
-        "id": "50044254710",
-        "name": "ai-driven-crime-analytics-and-visualization-60079422721.development"
+        "id": "50044312720",
+        "name": "ai-crime-analytics-ksp-60079862511.development"
       },
       "timezone": "Asia/Kolkata",
       "env": [
         {
           "idx": 1,
-          "id": "60079422721",
+          "id": "60079862511",
           "name": "Development",
           "type": 3
         }
