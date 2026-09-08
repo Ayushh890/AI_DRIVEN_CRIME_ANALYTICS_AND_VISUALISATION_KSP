@@ -51,8 +51,8 @@ loading the same tables from the CCTNS export — no changes to the API or UI.
                                                        ▲
                                          ┌─────────────┴───────────────┐
                                          │  Optional local LLM         │
-                                         │  Ollama · vLLM · LM Studio  │
-                                         │  or LoRA-fine-tuned model   │
+                                         │  OpenAI GPT- 4o mini        │
+                                         │                             |
                                          └─────────────────────────────┘
 ```
 
@@ -164,7 +164,7 @@ ollama pull llama3.2:1b   # 1.3 GB, fast on CPU; or llama3.1:8b if you have a GP
 # Point the backend at it
 export KSP_LLM_BACKEND=ollama
 export OLLAMA_HOST=http://localhost:11434
-export KSP_LLM_MODEL=llama3.2:1b
+export KSP_LLM_MODEL= GPT-4o mini 
 uvicorn backend.main:app --port 8000
 ```
 
