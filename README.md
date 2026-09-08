@@ -180,6 +180,19 @@ export OPENAI_API_KEY=sk-none
 export KSP_LLM_MODEL=phi-3-mini
 ```
 
+### Hosted OpenAI deployment
+
+The deployed Catalyst Assistant uses OpenAI's `gpt-4o-mini`. Configure the
+following variables in the Catalyst AppSail console; keep the API key out of
+this repository:
+
+```text
+KSP_LLM_BACKEND=openai
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_API_KEY=<stored in Catalyst only>
+KSP_LLM_MODEL=gpt-4o-mini
+```
+
 ### Fine-tuning on the KSP schema
 
 `scripts/train_llm.py` prepares a supervised text-to-SQL dataset (schema
